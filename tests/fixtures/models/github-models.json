@@ -1,0 +1,32 @@
+{
+  "models": [
+    {
+      "id": "dynamic/test-github-code-reasoner",
+      "name": "Dynamic GitHub Code Reasoner",
+      "publisher": "Dynamic",
+      "summary": "Reasoning model for code generation and tool use.",
+      "capabilities": [
+        "tool_calling",
+        "json_schema",
+        "reasoning"
+      ],
+      "limits": {
+        "max_input_tokens": 131072,
+        "max_output_tokens": 8192
+      }
+    },
+    {
+      "id": "dynamic/test-github-vision",
+      "name": "Dynamic GitHub Vision",
+      "publisher": "Dynamic",
+      "summary": "Vision-language model.",
+      "capabilities": [
+        "vision"
+      ],
+      "limits": {
+        "max_input_tokens": 32768,
+        "max_output_tokens": 4096
+      }
+    }
+  ]
+}

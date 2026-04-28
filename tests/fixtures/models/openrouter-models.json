@@ -1,0 +1,49 @@
+{
+  "data": [
+    {
+      "id": "dynamic/test-coder-free",
+      "name": "Dynamic Test Coder Free",
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text->text"
+      },
+      "supported_parameters": [
+        "tools",
+        "tool_choice",
+        "response_format"
+      ],
+      "pricing": {
+        "prompt": "0",
+        "completion": "0"
+      }
+    },
+    {
+      "id": "dynamic/test-embed-free",
+      "name": "Dynamic Test Embed Free",
+      "context_length": 8192,
+      "architecture": {
+        "modality": "text->embedding"
+      },
+      "supported_parameters": [],
+      "pricing": {
+        "prompt": "0",
+        "completion": "0"
+      }
+    },
+    {
+      "id": "dynamic/test-chat-paid",
+      "name": "Dynamic Test Chat Paid",
+      "context_length": 32768,
+      "architecture": {
+        "modality": "text->text"
+      },
+      "supported_parameters": [
+        "response_format"
+      ],
+      "pricing": {
+        "prompt": "0.000001",
+        "completion": "0.000002"
+      }
+    }
+  ]
+}
