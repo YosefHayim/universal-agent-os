@@ -69,7 +69,13 @@ test("CLI can create and complete a manual task in any project directory", async
       ]),
     );
     const dryRun = JSON.parse(runCli(projectDir, ["task", "dry-run", created.id, "--provider", "manual"]));
-    const completed = JSON.parse(runCli(projectDir, ["task", "run", created.id, "--provider", "manual"]));
+    const completedRaw = runCliRaw(projectDir, ["task", "run", created.id, "--provider", "manual"]);
+    assert.equal(
+      completedRaw.status,
+      0,
+      `agent-os task run failed\nstdout:\n${completedRaw.stdout}\nstderr:\n${completedRaw.stderr}`,
+    );
+    const completed = JSON.parse(completedRaw.stdout.trim());
     const listed = JSON.parse(runCli(projectDir, ["task", "list"]));
     const events = JSON.parse(runCli(projectDir, ["task", "events", created.id]));
     const status = JSON.parse(runCli(projectDir, ["task", "status", created.id]));
@@ -90,6 +96,10 @@ test("CLI can create and complete a manual task in any project directory", async
     assert.match(created.id, /^task-/);
     assert.equal(dryRun.status, "dry_run");
     assert.equal(completed.status, "completed");
+    assert.match(completedRaw.stderr, /\[universal-agent-os\] task task-.*context saved/);
+    assert.match(completedRaw.stderr, /\[universal-agent-os\] task task-.*route selected: manual/);
+    assert.match(completedRaw.stderr, /\[universal-agent-os\] task task-.*manual\/manual-1 workspace ready/);
+    assert.match(completedRaw.stderr, /\[universal-agent-os\] task task-.*manual\/manual-1 finished/);
     assert.equal(listed[0].taskId, created.id);
     assert.ok(events.events.some((event: { event: string }) => event.event === "task_completed"));
     assert.equal(status.status, "completed");

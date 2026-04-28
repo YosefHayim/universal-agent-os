@@ -4,6 +4,7 @@ import type { ProviderAvailability, ProviderId, RiskLevel } from "../core/types.
 import { Controller } from "../core/controller.js";
 import { printJson, printTable } from "./format.js";
 import { runInteractive } from "./interactive.js";
+import { writeAgentOsProgress } from "./progress.js";
 import { parseCsv } from "./prompts.js";
 
 export function createProgram(): Command {
@@ -122,7 +123,7 @@ function addTasks(program: Command): void {
     printJson(await controller(program).taskDryRun(taskId, opts.provider ? asProvider(opts.provider) : undefined, opts.model));
   });
   task.command("run").description("Run provider in an isolated worker copy and capture diff/logs/usage").argument("[taskId]", "defaults to latest task").option("--provider <provider>", "provider id", "manual").option("--model <model>", "exact model id; for Gemini prefer gemini-2.5-flash-lite if default is capacity limited").action(async (taskId, opts) => {
-    printJson(await controller(program).taskRun(taskId, asProvider(opts.provider), opts.model));
+    printJson(await controller(program).taskRun(taskId, asProvider(opts.provider), opts.model, { onProgress: writeAgentOsProgress }));
   });
   task.command("diff").description("Print captured worker diff").argument("[taskId]", "defaults to latest task").action(async (taskId) => console.log(await controller(program).taskDiff(taskId)));
   task.command("validate").description("Run validators on captured worker output").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskValidate(taskId)));
@@ -145,6 +146,7 @@ function agentGuide(): string {
     "  choose Create + run task",
     "  pick provider/model",
     "  use Task logs and Usage summary after the run",
+    "  live task runs print [universal-agent-os] progress to stderr; if the tag is absent, the caller is not using Agent OS",
     "",
     "Scripted path:",
     "  task_id=$(agent-os task create \"create src/example.txt with exactly this content: ok\" --allowed-files \"src/**\" --risk low | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d);process.stdin.on(\"end\",()=>console.log(JSON.parse(s).id))')",
@@ -161,6 +163,7 @@ function agentGuide(): string {
     "",
     "Important behavior:",
     "  Providers edit an isolated worker copy. Agent OS captures the diff, logs, validation, and usage.",
+    "  The context bundle is saved before worker launch and announced in [universal-agent-os] progress output.",
     "  Inspect changes with agent-os task diff <taskId> and the worker path in task logs/status.",
   ].join("\n");
 }

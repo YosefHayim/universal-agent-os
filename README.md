@@ -16,7 +16,7 @@ The TUI path is:
 1. Choose `Create + run task`.
 2. Enter a literal task goal and an allowed file scope such as `src/**`.
 3. Pick a provider and model. For Gemini, use `gemini-2.5-flash-lite` if the default `auto-gemini-3` route is capacity limited.
-4. Watch live run phases in the terminal.
+4. Watch `[universal-agent-os]` live run phases in the terminal.
 5. Use `Task logs`, `Task status`, `Task diff`, and `Usage summary` after the run.
 
 Scripted flow:
@@ -32,6 +32,8 @@ agent-os task logs "$task_id"
 agent-os usage
 ```
 
+`agent-os task run` writes tagged progress to stderr while preserving the final JSON result on stdout. If a worker run is happening and no `[universal-agent-os]` tag appears, that caller is not using Agent OS for the context bundle and isolated worker handoff.
+
 Direct CLI providers currently wired for worker launch:
 
 - `manual`
@@ -43,7 +45,7 @@ Direct CLI providers currently wired for worker launch:
 
 Cloud API catalog providers need credentials through `agent-os providers credentials` or the TUI `Provider API keys` menu.
 
-Important behavior: providers edit an isolated worker copy. Agent OS captures diff, logs, validation, and token usage under `.agent-os/`; inspect the captured patch with `agent-os task diff <taskId>`.
+Important behavior: providers edit an isolated worker copy. Agent OS saves the context bundle before launch, captures diff, logs, validation, and token usage under `.agent-os/`, and announces those phases with the `[universal-agent-os]` tag; inspect the captured patch with `agent-os task diff <taskId>`.
 
 ## Development
 

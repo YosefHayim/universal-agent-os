@@ -1,10 +1,10 @@
 import { confirm, input, password, select } from "@inquirer/prompts";
 import { DEFAULT_PROVIDERS, DIRECT_LAUNCH_PROVIDERS, PROVIDER_CREDENTIAL_ENV_VARS } from "../config/defaults.js";
-import { Controller } from "../core/controller.js";
+import { Controller, type TaskRunProgress } from "../core/controller.js";
 import type { ModelCatalogEntry, ProviderAvailability, ProviderId, RiskLevel } from "../core/types.js";
-import type { ExternalProviderProgress } from "../providers/external-runner.js";
 import { formatUsageLine, type UsageSummaryRow } from "../usage/usage.js";
 import { printTable } from "./format.js";
+import { formatAgentOsProgress } from "./progress.js";
 import { parseCsv } from "./prompts.js";
 
 export type MainAction =
@@ -399,30 +399,9 @@ async function runTaskWithLiveOutput(controller: Controller, taskId: string, pro
   printRunResult(result);
 }
 
-function printProgressEvent(event: ExternalProviderProgress): void {
-  if (event.event === "worker_prepared") {
-    console.log(`[${event.provider}] workspace ready`);
-    return;
-  }
-  if (event.event === "worker_launching") {
-    console.log(`[${event.provider}] launched`);
-    return;
-  }
-  if (event.event === "provider_output" || event.event === "provider_error_output") {
-    if (event.message) console.log(`[${event.provider}] ${truncate(event.message, 180)}`);
-    return;
-  }
-  if (event.event === "worker_exited") {
-    console.log(`[${event.provider}] exited after ${formatDuration(event.durationMs)}`);
-    return;
-  }
-  if (event.event === "diff_captured") {
-    console.log(`[${event.provider}] ${event.message}`);
-    return;
-  }
-  if (event.event === "worker_finished") {
-    console.log(`[${event.provider}] finished - ${formatUsageLine(event.usage)}`);
-  }
+function printProgressEvent(event: TaskRunProgress): void {
+  const line = formatAgentOsProgress(event);
+  if (line) console.log(line);
 }
 
 function printRuntimeStatus(value: unknown): void {

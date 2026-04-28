@@ -11,7 +11,7 @@ import {
   setProviderAvailability,
   setProviderCredential,
 } from "../config/config-loader.js";
-import type { ProviderAvailability, ProviderId, RiskLevel, RuntimePaths, Task, TaskPlan, TaskState, ValidationResult } from "./types.js";
+import type { ProviderAvailability, ProviderId, RiskLevel, RuntimePaths, SourceKind, Task, TaskPlan, TaskState, ValidationResult } from "./types.js";
 import { appendEvent, readTaskEvents } from "./events.js";
 import { compileContext } from "../context/compiler.js";
 import { listModels, modelsDoctor, refreshModels } from "../models/index.js";
@@ -25,6 +25,21 @@ import { summarizeUsage, type UsageSummary } from "../usage/usage.js";
 import { validateTaskRun } from "../validators/pipeline.js";
 import { taskDir, createTask, latestTaskId, listTaskIds, readPlan, readState, readTask, readTaskSummary, readTextIfExists, updateState } from "./lifecycle.js";
 import { withTaskLock } from "./locks.js";
+
+export type TaskRunProgress = ExternalProviderProgress | {
+  taskId: string;
+  event: "context_compiled";
+  bundlePath: string;
+  selectedFiles: string[];
+  message?: string;
+} | {
+  taskId: string;
+  event: "route_selected";
+  provider: ProviderId;
+  model?: string;
+  modelCatalogSource?: SourceKind;
+  message?: string;
+};
 
 export interface ControllerOptions {
   rootDir?: string;
@@ -285,7 +300,7 @@ export class Controller {
     taskId: string | undefined,
     provider: ProviderId = "manual",
     modelId?: string,
-    options: { onProgress?: (event: ExternalProviderProgress) => void | Promise<void> } = {},
+    options: { onProgress?: (event: TaskRunProgress) => void | Promise<void> } = {},
   ): Promise<Record<string, unknown>> {
     await this.init();
     const id = await this.resolveTaskId(taskId);
@@ -294,10 +309,25 @@ export class Controller {
       const task = await readTask(this.paths, id);
       const bundle = await compileContext(this.paths, task);
       await appendEvent(taskDir(this.paths, id), { taskId: id, event: "context_compiled", message: `${bundle.selectedFiles.length} files selected` });
+      await options.onProgress?.({
+        taskId: id,
+        event: "context_compiled",
+        bundlePath: bundle.bundlePath,
+        selectedFiles: bundle.selectedFiles,
+        message: `${bundle.selectedFiles.length} files selected`,
+      });
       const models = await listModels(this.paths, {});
       const route = await chooseRoute(this.paths, task, models, { requestedProvider: provider, requestedModelId: modelId });
       const selectedModelId = route.model?.id ?? route.modelId;
       await appendEvent(taskDir(this.paths, id), {
+        taskId: id,
+        event: "route_selected",
+        provider: route.provider,
+        model: selectedModelId,
+        modelCatalogSource: route.model?.source.kind,
+        message: route.reason,
+      });
+      await options.onProgress?.({
         taskId: id,
         event: "route_selected",
         provider: route.provider,
@@ -345,11 +375,15 @@ export class Controller {
         };
       }
       const manualStarted = Date.now();
-      await appendEvent(taskDir(this.paths, id), { taskId: id, event: "worker_prepared", provider: "manual", workerId: "manual-1", message: "manual provider workspace" });
+      const manualPrepared: ExternalProviderProgress = { taskId: id, event: "worker_prepared", provider: "manual", workerId: "manual-1", message: "manual provider workspace" };
+      await appendEvent(taskDir(this.paths, id), manualPrepared);
+      await options.onProgress?.(manualPrepared);
       const run = await runManualProvider({ paths: this.paths, cwd: this.paths.rootDir }, task, bundle.bundlePath, { workerId: "manual-1" });
       const durationMs = Date.now() - manualStarted;
       const usage = { exact: false, estimatedInputTokens: 0, estimatedOutputTokens: 0, estimatedTotalTokens: 0, inputChars: 0, outputChars: 0 };
-      await appendEvent(taskDir(this.paths, id), { taskId: id, event: "worker_finished", provider: "manual", workerId: run.worker.workerId, durationMs, usage, message: run.result.summary });
+      const manualFinished: ExternalProviderProgress = { taskId: id, event: "worker_finished", provider: "manual", workerId: run.worker.workerId, durationMs, usage, message: run.result.summary };
+      await appendEvent(taskDir(this.paths, id), manualFinished);
+      await options.onProgress?.(manualFinished);
       await updateState(this.paths, id, "completed", { provider: route.provider, workerId: run.worker.workerId, message: run.result.summary });
       return { taskId: id, status: "completed", provider: route.provider, workerId: run.worker.workerId, result: run.result, patchBytes: 0, durationMs, usage };
     });

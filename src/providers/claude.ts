@@ -26,6 +26,7 @@ export const claudeProvider: ProviderAdapter = {
       args: [
         "--output-format",
         "stream-json",
+        "--verbose",
         "--permission-mode",
         "bypassPermissions",
         "--no-session-persistence",

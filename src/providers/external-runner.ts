@@ -18,6 +18,7 @@ export interface ExternalProviderRun {
 }
 
 export interface ExternalProviderProgress {
+  taskId?: string;
   event:
     | "worker_prepared"
     | "worker_launching"
@@ -47,12 +48,13 @@ export async function runExternalProvider(
   await createTempCopy(ctx.cwd, workspacePath);
   const workerBundlePath = join(workspacePath, "agent-os-bundle.md");
   await copyFile(bundlePath, workerBundlePath);
-  await emitProgress(options.onProgress, { event: "worker_prepared", provider: adapter.id, workerId, message: workspacePath });
+  await emitProgress(options.onProgress, { taskId: task.id, event: "worker_prepared", provider: adapter.id, workerId, message: workspacePath });
 
   const startedAt = new Date().toISOString();
   const launchCommand = await adapter.buildLaunchCommand(ctx, task, workerBundlePath, options.modelId);
   await writeFile(join(workerPath, "launch-command.json"), `${JSON.stringify(launchCommand, null, 2)}\n`, "utf8");
   await emitProgress(options.onProgress, {
+    taskId: task.id,
     event: "worker_launching",
     provider: adapter.id,
     workerId,
@@ -60,9 +62,10 @@ export async function runExternalProvider(
   });
 
   const startedMs = Date.now();
-  const processResult = await runProcess(launchCommand, workspacePath, adapter.id, workerId, options.onProgress);
+  const processResult = await runProcess(launchCommand, workspacePath, adapter.id, workerId, task.id, options.onProgress);
   const durationMs = Date.now() - startedMs;
   await emitProgress(options.onProgress, {
+    taskId: task.id,
     event: "worker_exited",
     provider: adapter.id,
     workerId,
@@ -81,6 +84,7 @@ export async function runExternalProvider(
     isolation: "temp_copy",
   });
   await emitProgress(options.onProgress, {
+    taskId: task.id,
     event: "diff_captured",
     provider: adapter.id,
     workerId,
@@ -112,6 +116,7 @@ export async function runExternalProvider(
   await writeFile(join(workerPath, "usage.json"), `${JSON.stringify(usage, null, 2)}\n`, "utf8");
 
   await emitProgress(options.onProgress, {
+    taskId: task.id,
     event: "worker_finished",
     provider: adapter.id,
     workerId,
@@ -136,6 +141,7 @@ function runProcess(
   workspacePath: string,
   provider: ProviderId,
   workerId: string,
+  taskId: string,
   onProgress?: (event: ExternalProviderProgress) => void | Promise<void>,
 ): Promise<ProcessResult> {
   return new Promise((resolve) => {
@@ -159,12 +165,12 @@ function runProcess(
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;
-      emitProviderLines(onProgress, provider, workerId, text, "provider_output");
+      emitProviderLines(onProgress, provider, workerId, text, "provider_output", taskId);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stderr += text;
-      emitProviderLines(onProgress, provider, workerId, text, "provider_error_output");
+      emitProviderLines(onProgress, provider, workerId, text, "provider_error_output", taskId);
       if (isLimitText(text)) {
         errorMessage = "provider reported quota, rate, or capacity limit";
         killProcessGroup(child.pid, "SIGTERM");
@@ -210,11 +216,12 @@ function emitProviderLines(
   workerId: string,
   text: string,
   event: "provider_output" | "provider_error_output",
+  taskId?: string,
 ): void {
   if (!onProgress) return;
   const lines = text.split(/\r?\n/).map((line) => readableProviderLine(line)).filter(Boolean).slice(-3);
   for (const line of lines) {
-    void emitProgress(onProgress, { event, provider, workerId, message: line });
+    void emitProgress(onProgress, { taskId, event, provider, workerId, message: line });
   }
 }
 

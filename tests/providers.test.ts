@@ -14,6 +14,7 @@ import { geminiProvider } from "../src/providers/gemini.js";
 import { manualProvider } from "../src/providers/manual.js";
 import { opencodeProvider, selectOpencodeDefaultModel } from "../src/providers/opencode.js";
 import { cloudCatalogProvider } from "../src/providers/provider-factory.js";
+import { zaiProvider } from "../src/providers/zai.js";
 
 async function withTempProject<T>(fn: (projectDir: string) => Promise<T>): Promise<T> {
   const projectDir = await mkdtemp(path.join(tmpdir(), "agent-os-provider-"));
@@ -202,9 +203,19 @@ test("installed coding CLIs build headless auto-edit launch commands", async () 
     assert.ok(claude.args.includes("bypassPermissions"));
     assert.ok(claude.args.includes("--output-format"));
     assert.ok(claude.args.includes("stream-json"));
+    assert.ok(claude.args.includes("--verbose"));
     assert.ok(claude.args.includes("--model"));
     assert.ok(claude.args.includes("sonnet"));
     assert.match(claude.args.join(" "), /isolated workspace/);
+
+    const zai = await zaiProvider.buildLaunchCommand(ctx, task, bundlePath, "glm-4.6");
+    assert.equal(zai.command, "claude-zai");
+    assert.ok(zai.args.includes("-p"));
+    assert.ok(zai.args.includes("--output-format"));
+    assert.ok(zai.args.includes("stream-json"));
+    assert.ok(zai.args.includes("--verbose"));
+    assert.ok(zai.args.includes("--model"));
+    assert.ok(zai.args.includes("glm-4.6"));
 
     const gemini = await geminiProvider.buildLaunchCommand(ctx, task, bundlePath, "gemini-2.5-pro");
     assert.equal(gemini.command, "gemini");
