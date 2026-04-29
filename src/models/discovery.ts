@@ -2,7 +2,9 @@ import type { ModelCatalogFile, ProviderId, RuntimePaths } from "../core/types.j
 import { readModelCache, writeModelCache } from "./cache.js";
 import { codexSource } from "./sources/codex.js";
 import { anthropicSource } from "./sources/anthropic.js";
+import { clineSource } from "./sources/cline.js";
 import { zaiSource } from "./sources/zai.js";
+import { kiloSource } from "./sources/kilo.js";
 import { opencodeSource } from "./sources/opencode.js";
 import { openRouterSource } from "./sources/openrouter.js";
 import { githubModelsSource } from "./sources/github-models.js";
@@ -18,6 +20,8 @@ const SOURCES: Record<ProviderId, DiscoverySource | undefined> = {
   claude: anthropicSource,
   zai: zaiSource,
   opencode: opencodeSource,
+  kilo: kiloSource,
+  cline: clineSource,
   openrouter: openRouterSource,
   "github-models": githubModelsSource,
   gemini: geminiSource,

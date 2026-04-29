@@ -6,6 +6,8 @@ export type ProviderId =
   | "claude"
   | "zai"
   | "opencode"
+  | "kilo"
+  | "cline"
   | "openrouter"
   | "github-models"
   | "gemini"

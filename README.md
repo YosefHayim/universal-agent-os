@@ -47,6 +47,8 @@ Direct CLI providers currently wired for worker launch:
 - `zai`
 - `gemini`
 - `opencode`
+- `kilo`
+- `cline`
 
 Cloud API catalog providers need credentials through `agent-os providers credentials` or the TUI `Provider API keys` menu.
 

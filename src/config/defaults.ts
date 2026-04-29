@@ -19,6 +19,8 @@ export const DEFAULT_PROVIDERS: ProviderId[] = [
   "claude",
   "zai",
   "opencode",
+  "kilo",
+  "cline",
   "openrouter",
   "github-models",
   "gemini",
@@ -34,6 +36,8 @@ export const DIRECT_LAUNCH_PROVIDERS: readonly ProviderId[] = [
   "zai",
   "gemini",
   "opencode",
+  "kilo",
+  "cline",
 ];
 export const PROVIDER_AVAILABILITY_VALUES = ["available", "unavailable", "limited", "unknown"] as const;
 export const PROVIDER_CREDENTIAL_ENV_VARS: Record<ProviderId, string[]> = {
@@ -42,6 +46,8 @@ export const PROVIDER_CREDENTIAL_ENV_VARS: Record<ProviderId, string[]> = {
   claude: [],
   zai: [],
   opencode: [],
+  kilo: [],
+  cline: [],
   openrouter: ["OPENROUTER_API_KEY"],
   "github-models": ["GITHUB_TOKEN", "GH_TOKEN"],
   gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
