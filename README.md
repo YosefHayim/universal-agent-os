@@ -77,7 +77,7 @@ Runtime metadata lives at `.agent-os/runtime.json`. Run `agent-os upgrade` after
 
 ## Orchestrator edit guard
 
-The orchestrator edit guard feature blocks direct file-mutating operations at the orchestrator level: Claude Edit/Write/MultiEdit/NotebookEdit, Codex apply_patch, and shell commands that directly write files. This ensures that file modifications are delegated to agent-os workers and subagents.
+The orchestrator edit guard feature blocks direct repo inspection and file mutations at the orchestrator level: Read/Grep/Glob/LS/WebFetch/WebSearch, shell exploration like `rg`/`cat`/`sed`/`find`, Claude Edit/Write/MultiEdit/NotebookEdit, Codex apply_patch, and shell commands that directly write files. This ensures investigation and file modifications are delegated to agent-os workers and subagents.
 
 - **State file path:** The guard's state is stored in `$XDG_CONFIG_HOME/agent-os/orchestrator-block.json` (or `~/.config/agent-os/orchestrator-block.json`).
 - **Default:** The guard is enabled by default.
