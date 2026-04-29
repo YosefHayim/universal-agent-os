@@ -30,6 +30,7 @@ agent-os task validate "$task_id"
 agent-os task diff "$task_id"
 agent-os task logs "$task_id"
 agent-os usage
+agent-os upgrade
 ```
 
 `agent-os task run` writes tagged progress to stderr while preserving the final JSON result on stdout. If a worker run is happening and no `[universal-agent-os]` tag appears, that caller is not using Agent OS for the context bundle and isolated worker handoff.
@@ -45,7 +46,9 @@ Direct CLI providers currently wired for worker launch:
 
 Cloud API catalog providers need credentials through `agent-os providers credentials` or the TUI `Provider API keys` menu.
 
-Important behavior: providers edit an isolated worker copy. Agent OS saves the context bundle before launch, captures diff, logs, validation, and token usage under `.agent-os/`, and announces those phases with the `[universal-agent-os]` tag; inspect the captured patch with `agent-os task diff <taskId>`.
+Important behavior: providers edit an isolated worker copy. Agent OS saves a task-ranked context bundle before launch, uses file summaries when the byte budget is tight, captures diff, logs, validation, and token usage under `.agent-os/`, and announces those phases with the `[universal-agent-os]` tag; inspect the captured patch with `agent-os task diff <taskId>`.
+
+Runtime metadata lives at `.agent-os/runtime.json`. Run `agent-os upgrade` after pulling a newer Agent OS release to apply local runtime migrations explicitly.
 
 ## Development
 

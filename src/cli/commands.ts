@@ -22,6 +22,7 @@ Fast path:
   agent-os task logs <taskId>
   agent-os queue status
   agent-os usage
+  agent-os upgrade
 `);
   program.action(async () => {
     if (process.stdin.isTTY && process.stdout.isTTY) {
@@ -41,6 +42,10 @@ Fast path:
 
   program.command("status").description("Show Agent OS runtime status").action(async () => {
     printJson(await controller(program).status());
+  });
+
+  program.command("upgrade").description("Upgrade the project .agent-os runtime layout").action(async () => {
+    printJson(await controller(program).upgrade());
   });
 
   program.command("usage").description("Show provider token usage summary").action(async () => {
@@ -174,6 +179,7 @@ function agentGuide(): string {
     "  agent-os task logs \"$task_id\"",
     "  agent-os queue status",
     "  agent-os usage",
+    "  agent-os upgrade",
     "",
     "Provider notes:",
     "  direct CLIs: manual, codex, claude, zai, gemini, opencode",
@@ -182,7 +188,8 @@ function agentGuide(): string {
     "",
     "Important behavior:",
     "  Providers edit an isolated worker copy. Agent OS captures the diff, logs, validation, and usage.",
-    "  The context bundle is saved before worker launch and announced in [universal-agent-os] progress output.",
+    "  The context bundle is ranked by task relevance, saves lower-ranked files as summaries when the byte budget is tight, and is announced in [universal-agent-os] progress output.",
+    "  Runtime metadata lives in .agent-os/runtime.json; run agent-os upgrade after pulling a newer Agent OS release.",
     "  Inspect changes with agent-os task diff <taskId> and the worker path in task logs/status.",
   ].join("\n");
 }

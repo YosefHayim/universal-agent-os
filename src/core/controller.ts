@@ -8,8 +8,10 @@ import {
   providerCredentialSummaries,
   readProviderStatus,
   resolveRuntimePaths,
+  runtimeStatus,
   setProviderAvailability,
   setProviderCredential,
+  upgradeRuntimeLayout,
 } from "../config/config-loader.js";
 import type { ProviderAvailability, ProviderId, RiskLevel, RuntimePaths, SourceKind, Task, TaskPlan, TaskState, ValidationResult } from "./types.js";
 import { appendEvent, readTaskEvents } from "./events.js";
@@ -81,10 +83,12 @@ export class Controller {
     await this.init();
     const providerStatus = await readProviderStatus(this.paths);
     const providerHealth = await this.providerHealthRows(providerStatus.providers);
+    const runtime = await runtimeStatus(this.paths);
     return {
       ok: true,
       rootDir: this.paths.rootDir,
       runtimeDir: this.paths.runtimeDir,
+      runtime,
       providerOverrides: providerStatus.providers,
       providerHealth,
       generatedSourcePolicy: "Agent OS source is TypeScript; JavaScript is build output only.",
@@ -95,7 +99,13 @@ export class Controller {
     await this.init();
     const taskIds = await listTaskIds(this.paths);
     const latest = taskIds.at(-1);
-    return { rootDir: this.paths.rootDir, taskCount: taskIds.length, latestTaskId: latest };
+    return { rootDir: this.paths.rootDir, taskCount: taskIds.length, latestTaskId: latest, runtime: await runtimeStatus(this.paths) };
+  }
+
+  async upgrade(): Promise<Record<string, unknown>> {
+    const result = await upgradeRuntimeLayout(this.paths);
+    await this.init();
+    return { rootDir: this.paths.rootDir, ...result };
   }
 
   async providersStatus(): Promise<unknown> {
@@ -300,8 +310,10 @@ export class Controller {
       name: "context_compiled",
       attributes: {
         "agent_os.context.selected_files": bundle.selectedFiles.length,
+        "agent_os.context.summarized_files": bundle.summarizedFiles?.length ?? 0,
         "agent_os.context.used_bytes": bundle.usedBytes,
         "agent_os.context.budget_bytes": bundle.budgetBytes,
+        "agent_os.context.estimated_saved_bytes": bundle.estimatedSavedBytes,
       },
     });
     await appendEvent(taskDir(this.paths, id), {
@@ -360,8 +372,10 @@ export class Controller {
         name: "context_compiled",
         attributes: {
           "agent_os.context.selected_files": bundle.selectedFiles.length,
+          "agent_os.context.summarized_files": bundle.summarizedFiles?.length ?? 0,
           "agent_os.context.used_bytes": bundle.usedBytes,
           "agent_os.context.budget_bytes": bundle.budgetBytes,
+          "agent_os.context.estimated_saved_bytes": bundle.estimatedSavedBytes,
         },
       });
       await options.onProgress?.({
@@ -629,6 +643,10 @@ export class AgentOsController {
 
   async status(): Promise<unknown> {
     return new Controller({ rootDir: this.config.cwd }).status();
+  }
+
+  async upgrade(): Promise<unknown> {
+    return new Controller({ rootDir: this.config.cwd }).upgrade();
   }
 
   async providersStatus(): Promise<unknown> {

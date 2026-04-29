@@ -2,6 +2,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DEFAULT_PROVIDERS, PROVIDER_CREDENTIAL_ENV_VARS, RUNTIME_DIR } from "./defaults.js";
 import type { ProviderAvailability, ProviderId, ProviderStatus, RuntimePaths } from "../core/types.js";
+import { readRuntimeInfo, upgradeRuntime, type RuntimeInfo, type RuntimeUpgradeResult } from "./migrations.js";
 
 export interface ProviderStatusConfig {
   providers: Partial<Record<ProviderId, ProviderAvailability>>;
@@ -63,6 +64,7 @@ export async function ensureRuntime(paths = resolveRuntimePaths()): Promise<Runt
     mkdir(paths.modelCacheDir, { recursive: true }),
   ]);
   await ensureRuntimeGitignore(paths);
+  await upgradeRuntime(paths);
   await ensureProviderStatus(paths);
   await applyProviderCredentialEnv(paths);
   return paths;
@@ -79,6 +81,20 @@ export async function readJson<T>(path: string): Promise<T> {
 export async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+export async function runtimeStatus(paths: RuntimePaths): Promise<RuntimeInfo | undefined> {
+  return readRuntimeInfo(paths);
+}
+
+export async function upgradeRuntimeLayout(paths: RuntimePaths): Promise<RuntimeUpgradeResult> {
+  await Promise.all([
+    mkdir(paths.configDir, { recursive: true }),
+    mkdir(paths.tasksDir, { recursive: true }),
+    mkdir(paths.modelCacheDir, { recursive: true }),
+  ]);
+  await ensureRuntimeGitignore(paths);
+  return upgradeRuntime(paths);
 }
 
 export function providerStatusPath(paths: RuntimePaths): string {

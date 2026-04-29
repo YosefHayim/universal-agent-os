@@ -9,6 +9,7 @@ import { parseCsv } from "./prompts.js";
 
 export type MainAction =
   | "status"
+  | "upgrade"
   | "create-task"
   | "dry-run"
   | "run"
@@ -36,6 +37,7 @@ export async function runInteractive(controller = new Controller()): Promise<voi
       message: "Choose an action",
       choices: [
         { name: "Status", value: "status" },
+        { name: "Upgrade runtime", value: "upgrade" },
         { name: "Create + run task", value: "create-task" },
         { name: "Dry-run task", value: "dry-run" },
         { name: "Run existing task", value: "run" },
@@ -69,6 +71,10 @@ export async function runAction(controller: Controller, action: MainAction): Pro
   if (action === "status") {
     printRuntimeStatus(await controller.status());
     await showProviderHealth(controller);
+    return;
+  }
+  if (action === "upgrade") {
+    printTaskAction("Runtime upgrade", await controller.upgrade());
     return;
   }
   if (action === "create-task") {
