@@ -53,6 +53,33 @@ test("external runner writes live durable logs and suppresses usage-only progres
   });
 });
 
+test("external runner marks provider process as an agent-os worker", async () => {
+  await withTempProject(async (projectDir) => {
+    await mkdir(path.join(projectDir, "src"), { recursive: true });
+    await writeFile(path.join(projectDir, "src", "index.ts"), "export const value = 1;\n", "utf8");
+    const paths = await ensureRuntime(resolveRuntimePaths(projectDir));
+    const task = await createTask("capture worker env", { rootDir: projectDir, allowedFiles: ["src/**"], risk: "low" });
+    const bundle = await compileContext(paths, task);
+
+    const run = await runExternalProvider({ paths, cwd: projectDir }, task, bundle.bundlePath, fakeExternalAdapter([
+      "process.stdout.write(JSON.stringify({",
+      "  worker: process.env.AGENT_OS_WORKER,",
+      "  taskId: process.env.AGENT_OS_TASK_ID,",
+      "  workerId: process.env.AGENT_OS_WORKER_ID,",
+      "  provider: process.env.AGENT_OS_PROVIDER",
+      "}) + '\\n');",
+    ].join("\n")));
+
+    const workerDir = path.join(paths.tasksDir, task.id, "workers", run.worker.workerId);
+    const stdout = await readFile(path.join(workerDir, "stdout.log"), "utf8");
+    const env = JSON.parse(stdout.trim()) as { worker: string; taskId: string; workerId: string; provider: string };
+    assert.equal(env.worker, "1");
+    assert.equal(env.taskId, task.id);
+    assert.equal(env.workerId, run.worker.workerId);
+    assert.equal(env.provider, "manual");
+  });
+});
+
 test("external runner fails fast when provider output exceeds the configured byte limit", async () => {
   const originalLimit = process.env.AGENT_OS_PROVIDER_MAX_OUTPUT_BYTES;
   process.env.AGENT_OS_PROVIDER_MAX_OUTPUT_BYTES = "64";

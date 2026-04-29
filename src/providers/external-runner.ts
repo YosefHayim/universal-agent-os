@@ -170,7 +170,14 @@ function runProcess(
     const idleTimeoutMs = providerIdleTimeoutMs();
     const child = spawn(launchCommand.command, launchCommand.args, {
       cwd: launchCommand.cwd ?? workspacePath,
-      env: { ...process.env, ...launchCommand.env },
+      env: {
+        ...process.env,
+        ...launchCommand.env,
+        AGENT_OS_TASK_ID: taskId,
+        AGENT_OS_WORKER_ID: workerId,
+        AGENT_OS_PROVIDER: provider,
+        AGENT_OS_WORKER: "1",
+      },
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
