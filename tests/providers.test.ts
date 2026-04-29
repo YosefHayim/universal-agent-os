@@ -9,12 +9,16 @@ import { loadAgentOsConfig, providerCredentialsPath, setProviderStatusOverride }
 import { Controller } from "../src/core/controller.js";
 import type { ProviderContext, Task } from "../src/core/types.js";
 import { claudeProvider } from "../src/providers/claude.js";
+import { clineProvider } from "../src/providers/cline.js";
 import { codexProvider } from "../src/providers/codex.js";
 import { geminiProvider } from "../src/providers/gemini.js";
+import { kiloProvider } from "../src/providers/kilo.js";
 import { manualProvider } from "../src/providers/manual.js";
 import { opencodeProvider, selectOpencodeDefaultModel } from "../src/providers/opencode.js";
 import { cloudCatalogProvider } from "../src/providers/provider-factory.js";
 import { zaiProvider } from "../src/providers/zai.js";
+import { mapClineConfigModels, parseClineConfigModelIds } from "../src/models/sources/cline.js";
+import { mapKiloModels, parseKiloModelIds } from "../src/models/sources/kilo.js";
 
 async function withTempProject<T>(fn: (projectDir: string) => Promise<T>): Promise<T> {
   const projectDir = await mkdtemp(path.join(tmpdir(), "agent-os-provider-"));
@@ -237,6 +241,23 @@ test("installed coding CLIs build headless auto-edit launch commands", async () 
     assert.ok(opencode.args.includes("--model"));
     assert.ok(opencode.args.includes("anthropic/claude-sonnet-4-5"));
     assert.match(opencode.args.join(" "), /isolated workspace/);
+
+    const kilo = await kiloProvider.buildLaunchCommand(ctx, task, bundlePath, "kilo/kilo-auto/free");
+    assert.equal(kilo.command, "kilo");
+    assert.deepEqual(kilo.args.slice(0, 4), ["run", "--format", "json", "--dir"]);
+    assert.ok(kilo.args.includes(projectDir));
+    assert.ok(kilo.args.includes("--auto"));
+    assert.ok(kilo.args.includes("--model"));
+    assert.ok(kilo.args.includes("kilo/kilo-auto/free"));
+    assert.match(kilo.args.join(" "), /isolated workspace/);
+
+    const cline = await clineProvider.buildLaunchCommand(ctx, task, bundlePath, "qwen/qwen3.6-plus-preview:free");
+    assert.equal(cline.command, "cline");
+    assert.deepEqual(cline.args.slice(0, 5), ["task", "--act", "--yolo", "--json", "--cwd"]);
+    assert.ok(cline.args.includes(projectDir));
+    assert.ok(cline.args.includes("--model"));
+    assert.ok(cline.args.includes("qwen/qwen3.6-plus-preview:free"));
+    assert.match(cline.args.join(" "), /isolated workspace/);
   });
 });
 
@@ -256,6 +277,44 @@ test("opencode default model selection avoids stale config and output errors are
   assert.equal(selected, "github-copilot/grok-code-fast-1");
   assert.equal(parsed.status, "failed");
   assert.match(parsed.summary, /Model not found/);
+});
+
+test("kilo and cline model sources parse installed CLI output", () => {
+  const kiloOutput = [
+    "kilo/kilo-auto/free",
+    "kilo/google/gemini-2.5-flash-lite",
+    "kilo/~anthropic/claude-sonnet-latest",
+    "not a model row",
+    "kilo/kilo-auto/free",
+  ].join("\n");
+  const kiloIds = parseKiloModelIds(kiloOutput);
+  const kiloModels = mapKiloModels(kiloOutput);
+
+  assert.deepEqual(kiloIds, [
+    "kilo/kilo-auto/free",
+    "kilo/google/gemini-2.5-flash-lite",
+    "kilo/~anthropic/claude-sonnet-latest",
+  ]);
+  assert.equal(kiloModels[0]?.provider, "kilo");
+  assert.equal(kiloModels.find((entry) => entry.id === "kilo/kilo-auto/free")?.costCategory, "free_quota");
+
+  const clineOutput = [
+    "\u001b[2JactModeApiModelId: claude-sonnet-4-6",
+    "actModeClineModelId: qwen/qwen3.6-plus-preview:free",
+    "actModeOpenRouterModelId: kwaipilot/kat-coder-pro",
+    "autoApprovalSettings: {\"enabled\":true}",
+    "SIGTERM received, shutting down...",
+  ].join("\n");
+  const clineIds = parseClineConfigModelIds(clineOutput);
+  const clineModels = mapClineConfigModels(clineOutput);
+
+  assert.deepEqual(clineIds, [
+    "claude-sonnet-4-6",
+    "qwen/qwen3.6-plus-preview:free",
+    "kwaipilot/kat-coder-pro",
+  ]);
+  assert.equal(clineModels[0]?.provider, "cline");
+  assert.equal(clineModels.find((entry) => entry.id === "qwen/qwen3.6-plus-preview:free")?.costCategory, "free_quota");
 });
 
 test("codex parser honors final structured success despite noisy stderr", async () => {
@@ -294,6 +353,31 @@ test("stream-json providers can complete with non-fatal stderr", async () => {
   assert.equal(gemini.summary, "done");
   assert.equal(claude.status, "completed");
   assert.equal(claude.summary, "done");
+});
+
+test("kilo and cline parsers handle JSON events and failures", async () => {
+  const success = [
+    JSON.stringify({ type: "message", role: "assistant", content: "done", delta: false }),
+    JSON.stringify({ type: "result", status: "success" }),
+  ].join("\n");
+  const failure = JSON.stringify({
+    type: "error",
+    error: { name: "UnknownError", data: { message: "Model not found" } },
+  });
+
+  const kiloSuccess = await kiloProvider.parseOutput({} as never, success, "non-fatal warning");
+  const clineSuccess = await clineProvider.parseOutput({} as never, success, "non-fatal warning");
+  const kiloFailure = await kiloProvider.parseOutput({} as never, failure, "");
+  const clineFailure = await clineProvider.parseOutput({} as never, failure, "");
+
+  assert.equal(kiloSuccess.status, "completed");
+  assert.equal(kiloSuccess.summary, "done");
+  assert.equal(clineSuccess.status, "completed");
+  assert.equal(clineSuccess.summary, "done");
+  assert.equal(kiloFailure.status, "failed");
+  assert.match(kiloFailure.summary, /Model not found/);
+  assert.equal(clineFailure.status, "failed");
+  assert.match(clineFailure.summary, /Model not found/);
 });
 
 test("direct CLI dry-run accepts an uncached explicit model id", async () => {
