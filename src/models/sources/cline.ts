@@ -3,6 +3,12 @@ import { createCatalogEntry } from "../catalog.js";
 import { freeQuota, subscription } from "../pricing.js";
 import { catalogFile, sourceTimes, type DiscoverySource } from "./common.js";
 
+const OFFICIAL_FREE_MODEL_IDS = new Set([
+  "minimax/minimax-m2.5",
+  "kwaipilot/kat-coder-pro",
+  "z-ai/glm-5",
+]);
+
 export const clineSource: DiscoverySource = {
   provider: "cline",
   async discover() {
@@ -59,7 +65,7 @@ export function parseClineConfigModelIds(output: string): string[] {
 }
 
 function isFreeModelId(id: string): boolean {
-  return /(^|[-:/])free($|[-:/])|:free\b/i.test(id);
+  return OFFICIAL_FREE_MODEL_IDS.has(id) || /(^|[-:/])free($|[-:/])|:free\b/i.test(id);
 }
 
 function stripAnsi(value: string): string {

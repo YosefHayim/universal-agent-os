@@ -287,6 +287,8 @@ test("weak worker prompt carries principles and anti-hallucination output contra
   assert.match(prompt, /low-cost\/free worker models/);
   assert.match(prompt, /Do not claim/);
   assert.match(prompt, /Only report files, commands, tests, and outputs you actually observed/);
+  assert.match(prompt, /do not add punctuation/);
+  assert.match(prompt, /Missing or blank command output is not passing evidence/);
   assert.match(prompt, /KISS, YAGNI, DRY/);
   assert.match(prompt, /no TODOs/);
   assert.match(prompt, /Raw JSON only/);
@@ -353,6 +355,7 @@ test("kilo and cline model sources parse installed CLI output", () => {
   assert.equal(clineModels[0]?.provider, "cline");
   assert.equal(clineModels.find((entry) => entry.id === "qwen/qwen3.6-plus-preview:free")?.costCategory, "free_quota");
   assert.equal(clineModels.find((entry) => entry.id === "qwen/qwen3.6-plus-preview:free")?.codingGate.eligible, true);
+  assert.equal(clineModels.find((entry) => entry.id === "kwaipilot/kat-coder-pro")?.costCategory, "free_quota");
 });
 
 test("codex parser honors final structured success despite noisy stderr", async () => {
