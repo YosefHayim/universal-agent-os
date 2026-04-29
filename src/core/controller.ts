@@ -25,6 +25,8 @@ import { summarizeUsage, type UsageSummary } from "../usage/usage.js";
 import { validateTaskRun } from "../validators/pipeline.js";
 import { taskDir, createTask, latestTaskId, listTaskIds, readPlan, readState, readTask, readTaskSummary, readTextIfExists, updateState } from "./lifecycle.js";
 import { withTaskLock } from "./locks.js";
+import { TaskQueue, type QueueItem } from "./queue.js";
+import { appendTelemetrySpan } from "./telemetry.js";
 
 export type TaskRunProgress = ExternalProviderProgress | {
   taskId: string;
@@ -195,6 +197,7 @@ export class Controller {
   async taskCreate(goal: string, options: { allowedFiles?: string[]; risk?: RiskLevel }): Promise<Record<string, unknown>> {
     await this.init();
     const task = await createTask(goal, { ...options, rootDir: this.paths.rootDir });
+    await this.queue().enqueue(task.id, "created", "task created");
     return { id: task.id, taskId: task.id, task };
   }
 
@@ -219,6 +222,30 @@ export class Controller {
       events: summary.events,
       updatedAt: summary.state.updatedAt,
     }));
+  }
+
+  async queueStatus(): Promise<{ rootDir: string; items: QueueItem[] }> {
+    await this.init();
+    return { rootDir: this.paths.rootDir, items: await this.queue().list() };
+  }
+
+  async queuePause(taskId?: string): Promise<QueueItem> {
+    await this.init();
+    return this.queue().pause(await this.resolveTaskId(taskId));
+  }
+
+  async queueResume(taskId?: string): Promise<QueueItem> {
+    await this.init();
+    const id = await this.resolveTaskId(taskId);
+    await updateState(this.paths, id, "planned", { message: "ready to resume" });
+    return this.queue().resume(id);
+  }
+
+  async queueCancel(taskId?: string): Promise<QueueItem> {
+    await this.init();
+    const id = await this.resolveTaskId(taskId);
+    await updateState(this.paths, id, "cancelled", { message: "cancelled by user" });
+    return this.queue().cancel(id);
   }
 
   async taskPlan(taskId?: string): Promise<TaskPlan> {
@@ -266,7 +293,17 @@ export class Controller {
       selectedFiles: bundle.selectedFiles,
     }, null, 2)}\n`, "utf8");
     await updateState(this.paths, id, "dry_run", { provider: route.provider, modelId: selectedModelId, message: `dry-run route: ${route.reason}` });
+    await this.queue().update(id, "dry_run", `dry-run route: ${route.reason}`);
     await appendEvent(taskDir(this.paths, id), { taskId: id, event: "context_compiled", message: `${bundle.selectedFiles.length} files selected` });
+    await appendTelemetrySpan(this.paths, {
+      taskId: id,
+      name: "context_compiled",
+      attributes: {
+        "agent_os.context.selected_files": bundle.selectedFiles.length,
+        "agent_os.context.used_bytes": bundle.usedBytes,
+        "agent_os.context.budget_bytes": bundle.budgetBytes,
+      },
+    });
     await appendEvent(taskDir(this.paths, id), {
       taskId: id,
       event: "launch_preview_built",
@@ -274,6 +311,15 @@ export class Controller {
       model: selectedModelId,
       modelCatalogSource: route.model?.source.kind,
       message: `${launchPreview.command} ${launchPreview.args.join(" ")}`.trim(),
+    });
+    await appendTelemetrySpan(this.paths, {
+      taskId: id,
+      provider: route.provider,
+      name: "launch_preview_built",
+      attributes: {
+        "agent_os.model.id": selectedModelId,
+        "agent_os.model.source": route.model?.source.kind,
+      },
     });
     return {
       taskId: id,
@@ -309,6 +355,15 @@ export class Controller {
       const task = await readTask(this.paths, id);
       const bundle = await compileContext(this.paths, task);
       await appendEvent(taskDir(this.paths, id), { taskId: id, event: "context_compiled", message: `${bundle.selectedFiles.length} files selected` });
+      await appendTelemetrySpan(this.paths, {
+        taskId: id,
+        name: "context_compiled",
+        attributes: {
+          "agent_os.context.selected_files": bundle.selectedFiles.length,
+          "agent_os.context.used_bytes": bundle.usedBytes,
+          "agent_os.context.budget_bytes": bundle.budgetBytes,
+        },
+      });
       await options.onProgress?.({
         taskId: id,
         event: "context_compiled",
@@ -327,6 +382,16 @@ export class Controller {
         modelCatalogSource: route.model?.source.kind,
         message: route.reason,
       });
+      await appendTelemetrySpan(this.paths, {
+        taskId: id,
+        provider: route.provider,
+        name: "route_selected",
+        attributes: {
+          "agent_os.model.id": selectedModelId,
+          "agent_os.model.source": route.model?.source.kind,
+          "agent_os.route.reason": route.reason,
+        },
+      });
       await options.onProgress?.({
         taskId: id,
         event: "route_selected",
@@ -336,11 +401,19 @@ export class Controller {
         message: route.reason,
       });
       await updateState(this.paths, id, "running", { provider: route.provider, modelId: selectedModelId, message: "worker started" });
+      await this.queue().update(id, "running", "worker started");
       if (route.provider !== "manual") {
         const adapter = providerAdapter(route.provider);
         const capabilities = await adapter.capabilities({ paths: this.paths, cwd: this.paths.rootDir });
         if (!capabilities.canLaunch || !DIRECT_LAUNCH_PROVIDERS.includes(route.provider)) {
           await updateState(this.paths, id, "failed", { provider: route.provider, modelId: selectedModelId, message: `${route.provider} direct worker launch is not active` });
+          await this.queue().update(id, "failed", `${route.provider} direct worker launch is not active`);
+          await appendTelemetrySpan(this.paths, {
+            taskId: id,
+            provider: route.provider,
+            name: "worker_failed",
+            attributes: { "agent_os.failure.reason": `${route.provider} direct worker launch is not active` },
+          });
           throw new Error(`${route.provider} direct worker launch is not active`);
         }
         const run = await runExternalProvider({ paths: this.paths, cwd: this.paths.rootDir }, task, bundle.bundlePath, adapter, {
@@ -356,11 +429,36 @@ export class Controller {
                 usage: event.usage,
                 message: event.message,
               });
+              await appendTelemetrySpan(this.paths, {
+                taskId: id,
+                provider: event.provider,
+                workerId: event.workerId,
+                name: event.event,
+                durationMs: event.durationMs,
+                usage: event.usage,
+                attributes: {
+                  "agent_os.message": event.message,
+                },
+              });
             }
             await options.onProgress?.(event);
           },
         });
-        await updateState(this.paths, id, run.result.status === "completed" ? "completed" : "failed", { provider: route.provider, workerId: run.worker.workerId, modelId: selectedModelId, message: run.result.summary });
+        const taskStatus = run.result.status === "completed" ? "completed" : "failed";
+        await updateState(this.paths, id, taskStatus, { provider: route.provider, workerId: run.worker.workerId, modelId: selectedModelId, message: run.result.summary });
+        await this.queue().update(id, taskStatus, run.result.summary);
+        await appendTelemetrySpan(this.paths, {
+          taskId: id,
+          provider: route.provider,
+          workerId: run.worker.workerId,
+          name: `task_${taskStatus}`,
+          durationMs: run.durationMs,
+          usage: run.usage,
+          attributes: {
+            "agent_os.result.status": run.result.status,
+            "agent_os.patch.bytes": Buffer.byteLength(run.patch),
+          },
+        });
         if (run.result.status !== "completed") throw new Error(run.result.summary);
         return {
           taskId: id,
@@ -377,14 +475,39 @@ export class Controller {
       const manualStarted = Date.now();
       const manualPrepared: ExternalProviderProgress = { taskId: id, event: "worker_prepared", provider: "manual", workerId: "manual-1", message: "manual provider workspace" };
       await appendEvent(taskDir(this.paths, id), manualPrepared);
+      await appendTelemetrySpan(this.paths, {
+        taskId: id,
+        provider: "manual",
+        workerId: "manual-1",
+        name: "worker_prepared",
+        attributes: { "agent_os.message": manualPrepared.message },
+      });
       await options.onProgress?.(manualPrepared);
       const run = await runManualProvider({ paths: this.paths, cwd: this.paths.rootDir }, task, bundle.bundlePath, { workerId: "manual-1" });
       const durationMs = Date.now() - manualStarted;
       const usage = { exact: false, estimatedInputTokens: 0, estimatedOutputTokens: 0, estimatedTotalTokens: 0, inputChars: 0, outputChars: 0 };
       const manualFinished: ExternalProviderProgress = { taskId: id, event: "worker_finished", provider: "manual", workerId: run.worker.workerId, durationMs, usage, message: run.result.summary };
       await appendEvent(taskDir(this.paths, id), manualFinished);
+      await appendTelemetrySpan(this.paths, {
+        taskId: id,
+        provider: "manual",
+        workerId: run.worker.workerId,
+        name: "worker_finished",
+        durationMs,
+        usage,
+        attributes: { "agent_os.message": run.result.summary },
+      });
       await options.onProgress?.(manualFinished);
       await updateState(this.paths, id, "completed", { provider: route.provider, workerId: run.worker.workerId, message: run.result.summary });
+      await this.queue().update(id, "completed", run.result.summary);
+      await appendTelemetrySpan(this.paths, {
+        taskId: id,
+        provider: route.provider,
+        workerId: run.worker.workerId,
+        name: "task_completed",
+        durationMs,
+        usage,
+      });
       return { taskId: id, status: "completed", provider: route.provider, workerId: run.worker.workerId, result: run.result, patchBytes: 0, durationMs, usage };
     });
   }
@@ -407,7 +530,9 @@ export class Controller {
     const validationDir = join(taskDir(this.paths, id), "validation");
     await mkdir(validationDir, { recursive: true });
     await writeFile(join(validationDir, "test-output.txt"), `${result.status === "passed" ? "validation passed" : "validation failed"}\n${result.notes.join("\n")}\n`, "utf8");
-    await updateState(this.paths, id, result.status === "passed" ? "validated" : "failed", { message: `validation ${result.status}` });
+    const status = result.status === "passed" ? "validated" : "failed";
+    await updateState(this.paths, id, status, { message: `validation ${result.status}` });
+    await this.queue().update(id, status, `validation ${result.status}`);
     return result;
   }
 
@@ -419,6 +544,7 @@ export class Controller {
     if (!state.workerId) throw new Error("task has no worker result to review");
     const input = await buildReviewerInput(task, taskDir(this.paths, id), state.workerId);
     await updateState(this.paths, id, "reviewed", { message: "review packet generated" });
+    await this.queue().update(id, "reviewed", "review packet generated");
     return { taskId: id, reviewerInputBytes: input.length, path: join(taskDir(this.paths, id), "review", "reviewer-input.md") };
   }
 
@@ -430,27 +556,40 @@ export class Controller {
     const decision = judgeMerge(validation, true);
     if (decision.status !== "approved") throw new Error(decision.reason);
     await updateState(this.paths, id, "accepted", { message: decision.reason });
+    await this.queue().update(id, "accepted", decision.reason);
     return { taskId: id, decision };
   }
 
   async taskReject(taskId?: string): Promise<TaskState> {
     await this.init();
-    return updateState(this.paths, await this.resolveTaskId(taskId), "rejected", { message: "rejected by user" });
+    const id = await this.resolveTaskId(taskId);
+    const state = await updateState(this.paths, id, "rejected", { message: "rejected by user" });
+    await this.queue().update(id, "rejected", "rejected by user");
+    return state;
   }
 
   async taskCancel(taskId?: string): Promise<TaskState> {
     await this.init();
-    return updateState(this.paths, await this.resolveTaskId(taskId), "cancelled", { message: "cancelled by user" });
+    const id = await this.resolveTaskId(taskId);
+    const state = await updateState(this.paths, id, "cancelled", { message: "cancelled by user" });
+    await this.queue().cancel(id);
+    return state;
   }
 
   async taskResume(taskId?: string): Promise<TaskState> {
     await this.init();
-    return updateState(this.paths, await this.resolveTaskId(taskId), "planned", { message: "ready to resume" });
+    const id = await this.resolveTaskId(taskId);
+    const state = await updateState(this.paths, id, "planned", { message: "ready to resume" });
+    await this.queue().resume(id);
+    return state;
   }
 
   async taskRollback(taskId?: string): Promise<TaskState> {
     await this.init();
-    return updateState(this.paths, await this.resolveTaskId(taskId), "planned", { message: "rollback recorded; isolated workspace left for inspection" });
+    const id = await this.resolveTaskId(taskId);
+    const state = await updateState(this.paths, id, "planned", { message: "rollback recorded; isolated workspace left for inspection" });
+    await this.queue().update(id, "planned", "rollback recorded; isolated workspace left for inspection");
+    return state;
   }
 
   private async resolveTaskId(taskId?: string): Promise<string> {
@@ -458,6 +597,10 @@ export class Controller {
     const latest = await latestTaskId(this.paths);
     if (!latest) throw new Error("No task id provided and no tasks exist");
     return latest;
+  }
+
+  private queue(): TaskQueue {
+    return new TaskQueue(this.paths);
   }
 }
 
@@ -513,7 +656,11 @@ export class AgentOsController {
   }
 
   async createTask(input: CreateTaskInput): Promise<Task> {
-    return createTask(input.goal, { allowedFiles: input.allowedFiles, risk: input.risk, rootDir: this.config.cwd });
+    const created = await new Controller({ rootDir: this.config.cwd }).taskCreate(input.goal, {
+      allowedFiles: input.allowedFiles,
+      risk: input.risk,
+    }) as { task: Task };
+    return created.task;
   }
 
   async taskStatus(taskId: string): Promise<TaskState> {
@@ -568,5 +715,21 @@ export class AgentOsController {
 
   async rollbackTask(taskId: string): Promise<TaskState> {
     return new Controller({ rootDir: this.config.cwd }).taskRollback(taskId);
+  }
+
+  async queueStatus(): Promise<unknown> {
+    return new Controller({ rootDir: this.config.cwd }).queueStatus();
+  }
+
+  async queuePause(taskId?: string): Promise<QueueItem> {
+    return new Controller({ rootDir: this.config.cwd }).queuePause(taskId);
+  }
+
+  async queueResume(taskId?: string): Promise<QueueItem> {
+    return new Controller({ rootDir: this.config.cwd }).queueResume(taskId);
+  }
+
+  async queueCancel(taskId?: string): Promise<QueueItem> {
+    return new Controller({ rootDir: this.config.cwd }).queueCancel(taskId);
   }
 }

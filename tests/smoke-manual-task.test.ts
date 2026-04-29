@@ -79,6 +79,10 @@ test("CLI can create and complete a manual task in any project directory", async
     const listed = JSON.parse(runCli(projectDir, ["task", "list"]));
     const events = JSON.parse(runCli(projectDir, ["task", "events", created.id]));
     const status = JSON.parse(runCli(projectDir, ["task", "status", created.id]));
+    const queue = JSON.parse(runCli(projectDir, ["queue", "status"]));
+    const taskDir = path.join(projectDir, ".agent-os", "tasks", created.id);
+    const telemetry = await readFile(path.join(projectDir, ".agent-os", "telemetry.ndjson"), "utf8");
+    const contextFiles = JSON.parse(await readFile(path.join(taskDir, "context", "files.json"), "utf8"));
 
     assert.match(help, /Usage: agent-os/);
     assert.match(help, /agent-os guide/);
@@ -103,6 +107,10 @@ test("CLI can create and complete a manual task in any project directory", async
     assert.equal(listed[0].taskId, created.id);
     assert.ok(events.events.some((event: { event: string }) => event.event === "task_completed"));
     assert.equal(status.status, "completed");
+    assert.equal(queue.items.find((item: { taskId: string }) => item.taskId === created.id)?.status, "completed");
+    assert.match(telemetry, /"agent_os\.task\.id"/);
+    assert.equal(typeof contextFiles.budgetBytes, "number");
+    assert.ok(Array.isArray(contextFiles.files));
   });
 });
 

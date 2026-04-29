@@ -18,6 +18,7 @@ export type MainAction =
   | "reject"
   | "task-status"
   | "task-logs"
+  | "queue-status"
   | "usage"
   | "models-refresh"
   | "models-list"
@@ -44,6 +45,7 @@ export async function runInteractive(controller = new Controller()): Promise<voi
         { name: "Reject task", value: "reject" },
         { name: "Task status", value: "task-status" },
         { name: "Task logs", value: "task-logs" },
+        { name: "Queue status", value: "queue-status" },
         { name: "Usage summary", value: "usage" },
         { name: "Refresh models", value: "models-refresh" },
         { name: "List models", value: "models-list" },
@@ -109,6 +111,10 @@ export async function runAction(controller: Controller, action: MainAction): Pro
   if (action === "task-logs") {
     const taskId = await chooseTask(controller);
     if (taskId) await showTaskLogs(controller, taskId);
+    return;
+  }
+  if (action === "queue-status") {
+    printQueueStatus(await controller.queueStatus());
     return;
   }
   if (action === "usage") {
@@ -434,6 +440,19 @@ function printTaskDetails(value: unknown): void {
   console.log(`Files: ${Array.isArray(task.allowedFiles) ? task.allowedFiles.join(", ") : ""}`);
   console.log(`Events: ${record.events ?? ""}`);
   if (state.message) console.log(`Message: ${state.message}`);
+}
+
+function printQueueStatus(value: unknown): void {
+  const record = asRecord(value);
+  const items = Array.isArray(record.items) ? record.items as Array<Record<string, unknown>> : [];
+  console.log("");
+  console.log(`Queue: ${items.length} task${items.length === 1 ? "" : "s"}`);
+  printTable(items.map((item) => ({
+    task: item.taskId,
+    status: item.status,
+    updated: item.updatedAt ?? "",
+    message: truncate(String(item.message ?? ""), 120),
+  })));
 }
 
 function printRunResult(value: unknown): void {

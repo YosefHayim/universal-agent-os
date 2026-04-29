@@ -20,6 +20,7 @@ Fast path:
   agent-os task run <taskId> --provider gemini --model gemini-2.5-flash-lite
   agent-os task validate <taskId>
   agent-os task logs <taskId>
+  agent-os queue status
   agent-os usage
 `);
   program.action(async () => {
@@ -52,6 +53,7 @@ Fast path:
 
   addProviders(program);
   addModels(program);
+  addQueue(program);
   addTasks(program);
   return program;
 }
@@ -105,6 +107,22 @@ function addModels(program: Command): void {
   models.command("doctor").description("Show model cache health").action(async () => printJson(await controller(program).modelsDoctor()));
 }
 
+function addQueue(program: Command): void {
+  const queue = program.command("queue").description("Persisted task queue status and controls");
+  queue.command("status").alias("list").description("Show persisted task queue").action(async () => {
+    printJson(await controller(program).queueStatus());
+  });
+  queue.command("pause").description("Mark a queued task as paused").argument("[taskId]", "defaults to latest task").action(async (taskId) => {
+    printJson(await controller(program).queuePause(taskId));
+  });
+  queue.command("resume").description("Mark a paused task ready to resume").argument("[taskId]", "defaults to latest task").action(async (taskId) => {
+    printJson(await controller(program).queueResume(taskId));
+  });
+  queue.command("cancel").description("Cancel a queued task").argument("[taskId]", "defaults to latest task").action(async (taskId) => {
+    printJson(await controller(program).queueCancel(taskId));
+  });
+}
+
 function addTasks(program: Command): void {
   const task = program.command("task").description("Task lifecycle");
   task.command("create")
@@ -154,6 +172,7 @@ function agentGuide(): string {
     "  agent-os task validate \"$task_id\"",
     "  agent-os task diff \"$task_id\"",
     "  agent-os task logs \"$task_id\"",
+    "  agent-os queue status",
     "  agent-os usage",
     "",
     "Provider notes:",

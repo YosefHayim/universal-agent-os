@@ -31,6 +31,10 @@ test("interactive status actions use live provider health, not persisted overrid
       calls.push("providersStatus");
       throw new Error("interactive status must not print raw provider overrides");
     },
+    async queueStatus() {
+      calls.push("queueStatus");
+      return { items: [{ taskId: "task-a", status: "completed", updatedAt: "2026-04-29T00:00:00.000Z" }] };
+    },
   } as unknown as Controller;
 
   await captureLogs(async () => runAction(fakeController, "status"));
@@ -39,6 +43,10 @@ test("interactive status actions use live provider health, not persisted overrid
   calls.length = 0;
   await captureLogs(async () => runAction(fakeController, "provider-status"));
   assert.deepEqual(calls, ["providersDoctor"]);
+
+  calls.length = 0;
+  await captureLogs(async () => runAction(fakeController, "queue-status"));
+  assert.deepEqual(calls, ["queueStatus"]);
 });
 
 async function captureLogs(fn: () => Promise<void>): Promise<string[]> {

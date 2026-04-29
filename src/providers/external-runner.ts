@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderAdapter } from "./adapter.js";
@@ -62,7 +62,13 @@ export async function runExternalProvider(
   });
 
   const startedMs = Date.now();
-  const processResult = await runProcess(launchCommand, workspacePath, adapter.id, workerId, task.id, options.onProgress);
+  const stdoutPath = join(workerPath, "stdout.log");
+  const stderrPath = join(workerPath, "stderr.log");
+  const heartbeatPath = join(workerPath, "heartbeat.json");
+  await writeFile(stdoutPath, "", "utf8");
+  await writeFile(stderrPath, "", "utf8");
+  await writeFile(heartbeatPath, `${JSON.stringify({ taskId: task.id, workerId, status: "running", checkedAt: startedAt }, null, 2)}\n`, "utf8");
+  const processResult = await runProcess(launchCommand, workspacePath, workerPath, adapter.id, workerId, task.id, options.onProgress);
   const durationMs = Date.now() - startedMs;
   await emitProgress(options.onProgress, {
     taskId: task.id,
@@ -139,6 +145,7 @@ interface ProcessResult {
 function runProcess(
   launchCommand: LaunchCommand,
   workspacePath: string,
+  workerPath: string,
   provider: ProviderId,
   workerId: string,
   taskId: string,
@@ -149,6 +156,17 @@ function runProcess(
     let stderr = "";
     let errorMessage = "";
     let timedOut = false;
+    let idleTimedOut = false;
+    let outputLimitHit = false;
+    let outputBytes = 0;
+    let lastOutputAt = new Date().toISOString();
+    let lastHeartbeatWriteMs = 0;
+    let pendingWrites = Promise.resolve();
+    const stdoutPath = join(workerPath, "stdout.log");
+    const stderrPath = join(workerPath, "stderr.log");
+    const heartbeatPath = join(workerPath, "heartbeat.json");
+    const maxOutputBytes = providerMaxOutputBytes();
+    const idleTimeoutMs = providerIdleTimeoutMs();
     const child = spawn(launchCommand.command, launchCommand.args, {
       cwd: launchCommand.cwd ?? workspacePath,
       env: { ...process.env, ...launchCommand.env },
@@ -156,40 +174,94 @@ function runProcess(
       detached: true,
     });
     let killTimer: NodeJS.Timeout | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       timedOut = true;
-      killProcessGroup(child.pid, "SIGTERM");
-      killTimer = setTimeout(() => killProcessGroup(child.pid, "SIGKILL"), 5_000);
+      requestStop(`${provider} timed out after ${providerTimeoutMs()}ms`);
     }, providerTimeoutMs());
+    resetIdleTimer();
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;
+      recordOutput(stdoutPath, text);
       emitProviderLines(onProgress, provider, workerId, text, "provider_output", taskId);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stderr += text;
+      recordOutput(stderrPath, text);
       emitProviderLines(onProgress, provider, workerId, text, "provider_error_output", taskId);
       if (isLimitText(text)) {
-        errorMessage = "provider reported quota, rate, or capacity limit";
-        killProcessGroup(child.pid, "SIGTERM");
+        requestStop("provider reported quota, rate, or capacity limit");
       }
     });
     child.on("error", (error) => {
       errorMessage = error.message;
     });
-    child.on("close", (code, signal) => {
+    child.on("close", async (code, signal) => {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      writeHeartbeat("exited", true);
+      await pendingWrites;
       resolve({
         stdout,
         stderr,
-        exitCode: timedOut ? 124 : code ?? (signal ? 124 : 1),
+        exitCode: timedOut || idleTimedOut || outputLimitHit ? 124 : code ?? (signal ? 124 : 1),
         signal,
-        errorMessage: timedOut ? `${provider} timed out after ${providerTimeoutMs()}ms` : errorMessage,
+        errorMessage,
       });
     });
+
+    function recordOutput(path: string, text: string): void {
+      const bytes = Buffer.byteLength(text, "utf8");
+      outputBytes += bytes;
+      lastOutputAt = new Date().toISOString();
+      enqueueWrite(() => appendFile(path, text, "utf8"));
+      writeHeartbeat("running");
+      resetIdleTimer();
+      if (outputBytes > maxOutputBytes && !outputLimitHit) {
+        outputLimitHit = true;
+        requestStop(`${provider} exceeded max output bytes (${maxOutputBytes})`);
+      }
+    }
+
+    function resetIdleTimer(): void {
+      if (!idleTimeoutMs) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idleTimedOut = true;
+        requestStop(`${provider} produced no output for ${idleTimeoutMs}ms`);
+      }, idleTimeoutMs);
+    }
+
+    function requestStop(message: string): void {
+      if (!errorMessage) errorMessage = message;
+      killProcessGroup(child.pid, "SIGTERM");
+      killTimer ??= setTimeout(() => killProcessGroup(child.pid, "SIGKILL"), 5_000);
+    }
+
+    function writeHeartbeat(status: "running" | "exited", force = false): void {
+      const now = Date.now();
+      if (!force && now - lastHeartbeatWriteMs < 1000) return;
+      lastHeartbeatWriteMs = now;
+      enqueueWrite(() => writeFile(heartbeatPath, `${JSON.stringify({
+        taskId,
+        workerId,
+        status,
+        checkedAt: new Date().toISOString(),
+        lastOutputAt,
+        outputBytes,
+        maxOutputBytes,
+      }, null, 2)}\n`, "utf8"));
+    }
+
+    function enqueueWrite(action: () => Promise<void>): void {
+      pendingWrites = pendingWrites.then(action, action).catch((error: unknown) => {
+        if (!errorMessage) errorMessage = `provider log write failed: ${error instanceof Error ? error.message : String(error)}`;
+      });
+    }
   });
 }
 
@@ -240,7 +312,7 @@ function readableProviderLine(line: string): string {
     const event = JSON.parse(trimmed) as {
       type?: string;
       role?: string;
-      content?: string;
+      content?: string | Array<{ type?: string; text?: string }>;
       item?: { type?: string; text?: string };
       part?: { type?: string; text?: string };
       result?: string;
@@ -257,12 +329,13 @@ function readableProviderLine(line: string): string {
     if (event.type === "text" && event.part?.type === "text" && event.part.text) {
       return `agent: ${trimLog(event.part.text)}`;
     }
-    if (event.type === "message" && event.role === "assistant" && event.content) {
-      return `agent: ${trimLog(event.content)}`;
+    const messageText = contentText(event.content);
+    if (event.type === "message" && event.role === "assistant" && messageText) {
+      return `agent: ${trimLog(messageText)}`;
     }
     if (event.type === "result" && event.result) return `result: ${trimLog(event.result)}`;
     if (event.type === "result" && event.status) return `result: ${event.status}`;
-    if (event.type === "turn.completed" || event.usage || event.stats) return "usage received";
+    if (event.type === "turn.completed" || event.usage || event.stats) return "";
   } catch {
     return "";
   }
@@ -272,6 +345,16 @@ function readableProviderLine(line: string): string {
 function providerTimeoutMs(): number {
   const value = Number(process.env.AGENT_OS_PROVIDER_TIMEOUT_MS ?? 10 * 60 * 1000);
   return Number.isFinite(value) && value > 0 ? value : 10 * 60 * 1000;
+}
+
+function providerMaxOutputBytes(): number {
+  const value = Number(process.env.AGENT_OS_PROVIDER_MAX_OUTPUT_BYTES ?? 5 * 1024 * 1024);
+  return Number.isFinite(value) && value > 0 ? value : 5 * 1024 * 1024;
+}
+
+function providerIdleTimeoutMs(): number {
+  const value = Number(process.env.AGENT_OS_PROVIDER_IDLE_TIMEOUT_MS ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 async function buildProviderResult(
@@ -313,16 +396,32 @@ function finalAgentMessage(stdout: string): string {
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
-      const event = JSON.parse(line) as { type?: string; item?: { type?: string; text?: string }; part?: { type?: string; text?: string } };
+      const event = JSON.parse(line) as {
+        type?: string;
+        role?: string;
+        content?: string | Array<{ type?: string; text?: string }>;
+        item?: { type?: string; text?: string };
+        part?: { type?: string; text?: string };
+      };
       if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
         finalText = event.item.text;
       }
       if (event.type === "text" && event.part?.type === "text" && event.part.text) {
         finalText = event.part.text;
       }
+      const messageText = contentText(event.content);
+      if (event.type === "message" && event.role === "assistant" && messageText) {
+        finalText = messageText;
+      }
     } catch {
       continue;
     }
   }
   return finalText;
+}
+
+function contentText(content: string | Array<{ type?: string; text?: string }> | undefined): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => part.type === "text" ? part.text ?? "" : "").filter(Boolean).join("\n");
 }
