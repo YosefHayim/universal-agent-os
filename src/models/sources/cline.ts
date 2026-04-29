@@ -28,6 +28,7 @@ export function mapClineConfigModels(output: string, times = sourceTimes()) {
     return createCatalogEntry({
       provider: "cline",
       id,
+      displayName: `${id} coding worker model`,
       costCategory: pricing.costCategory,
       pricing: pricing.pricing,
       requiresApproval: pricing.requiresApproval,

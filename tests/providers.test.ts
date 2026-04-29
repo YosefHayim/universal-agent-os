@@ -19,6 +19,8 @@ import { cloudCatalogProvider } from "../src/providers/provider-factory.js";
 import { zaiProvider } from "../src/providers/zai.js";
 import { mapClineConfigModels, parseClineConfigModelIds } from "../src/models/sources/cline.js";
 import { mapKiloModels, parseKiloModelIds } from "../src/models/sources/kilo.js";
+import { writeModelCache } from "../src/models/cache.js";
+import { catalogFile } from "../src/models/sources/common.js";
 
 async function withTempProject<T>(fn: (projectDir: string) => Promise<T>): Promise<T> {
   const projectDir = await mkdtemp(path.join(tmpdir(), "agent-os-provider-"));
@@ -284,6 +286,7 @@ test("kilo and cline model sources parse installed CLI output", () => {
     "kilo/kilo-auto/free",
     "kilo/google/gemini-2.5-flash-lite",
     "kilo/~anthropic/claude-sonnet-latest",
+    "a/model-code",
     "not a model row",
     "kilo/kilo-auto/free",
   ].join("\n");
@@ -294,9 +297,11 @@ test("kilo and cline model sources parse installed CLI output", () => {
     "kilo/kilo-auto/free",
     "kilo/google/gemini-2.5-flash-lite",
     "kilo/~anthropic/claude-sonnet-latest",
+    "a/model-code",
   ]);
   assert.equal(kiloModels[0]?.provider, "kilo");
   assert.equal(kiloModels.find((entry) => entry.id === "kilo/kilo-auto/free")?.costCategory, "free_quota");
+  assert.equal(kiloModels.find((entry) => entry.id === "kilo/kilo-auto/free")?.codingGate.eligible, true);
 
   const clineOutput = [
     "\u001b[2JactModeApiModelId: claude-sonnet-4-6",
@@ -315,6 +320,7 @@ test("kilo and cline model sources parse installed CLI output", () => {
   ]);
   assert.equal(clineModels[0]?.provider, "cline");
   assert.equal(clineModels.find((entry) => entry.id === "qwen/qwen3.6-plus-preview:free")?.costCategory, "free_quota");
+  assert.equal(clineModels.find((entry) => entry.id === "qwen/qwen3.6-plus-preview:free")?.codingGate.eligible, true);
 });
 
 test("codex parser honors final structured success despite noisy stderr", async () => {
@@ -393,10 +399,30 @@ test("direct CLI dry-run accepts an uncached explicit model id", async () => {
       model?: { id?: string };
       launchCommand: { args: string[] };
     };
+    await writeModelCache(controller.paths, catalogFile("kilo", "test", mapKiloModels("kilo/kilo-auto/free")));
+    await writeModelCache(controller.paths, catalogFile("cline", "test", mapClineConfigModels("actModeClineModelId: qwen/qwen3.6-plus-preview:free")));
+    const kiloDryRun = await controller.taskDryRun(created.id, "kilo", "kilo/kilo-auto/free") as {
+      provider: string;
+      model?: { id?: string };
+      launchCommand: { command: string; args: string[] };
+    };
+    const clineDryRun = await controller.taskDryRun(created.id, "cline", "qwen/qwen3.6-plus-preview:free") as {
+      provider: string;
+      model?: { id?: string };
+      launchCommand: { command: string; args: string[] };
+    };
 
     assert.equal(dryRun.provider, "gemini");
     assert.equal(dryRun.model?.id, "gemini-2.5-flash-lite");
     assert.ok(dryRun.launchCommand.args.includes("--model"));
     assert.ok(dryRun.launchCommand.args.includes("gemini-2.5-flash-lite"));
+    assert.equal(kiloDryRun.provider, "kilo");
+    assert.equal(kiloDryRun.model?.id, "kilo/kilo-auto/free");
+    assert.equal(kiloDryRun.launchCommand.command, "kilo");
+    assert.ok(kiloDryRun.launchCommand.args.includes("kilo/kilo-auto/free"));
+    assert.equal(clineDryRun.provider, "cline");
+    assert.equal(clineDryRun.model?.id, "qwen/qwen3.6-plus-preview:free");
+    assert.equal(clineDryRun.launchCommand.command, "cline");
+    assert.ok(clineDryRun.launchCommand.args.includes("qwen/qwen3.6-plus-preview:free"));
   });
 });

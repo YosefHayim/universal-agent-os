@@ -27,6 +27,7 @@ export function mapKiloModels(output: string, times = sourceTimes()) {
     return createCatalogEntry({
       provider: "kilo",
       id,
+      displayName: `${id} coding worker model`,
       costCategory: pricing.costCategory,
       pricing: pricing.pricing,
       requiresApproval: pricing.requiresApproval,
@@ -49,7 +50,7 @@ export function parseKiloModelIds(output: string): string[] {
     output
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .filter((line) => /^[a-z0-9][a-z0-9._~:/+-]+\/[a-z0-9~][a-z0-9._~:/+-]+$/i.test(line)),
+      .filter((line) => /^[a-z0-9][a-z0-9._~:/+-]*\/[a-z0-9~][a-z0-9._~:/+-]+$/i.test(line)),
   ));
 }
 

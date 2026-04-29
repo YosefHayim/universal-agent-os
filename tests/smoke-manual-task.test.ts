@@ -90,6 +90,7 @@ test("CLI can create and complete a manual task in any project directory", async
     assert.match(help, /agent-os guide/);
     assert.match(guide, /Agent OS quick runbook/);
     assert.match(guide, /gemini-2\.5-flash-lite/);
+    assert.match(guide, /kilo, cline/);
     assert.match(taskRunHelp, /isolated worker copy/);
     assert.match(taskHelp, /pause \[taskId\]/);
     assert.match(taskHelp, /recover \[options\] \[taskId\]/);

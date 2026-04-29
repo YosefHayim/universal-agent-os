@@ -6,12 +6,12 @@ import { limitFromText, type ModelSelection, type ProviderAdapter } from "./adap
 
 export const kiloProvider: ProviderAdapter = {
   id: "kilo",
-  async detect(): Promise<ProviderDetection> {
+  async detect(_ctx: ProviderContext): Promise<ProviderDetection> {
     const result = spawnSync("kilo", ["--version"], { encoding: "utf8", timeout: 5_000 });
     return { available: result.status === 0, detail: result.status === 0 ? `kilo ${result.stdout.trim()}` : "kilo binary unavailable" };
   },
-  async status(): Promise<ProviderStatus> {
-    const detection = await this.detect({} as ProviderContext);
+  async status(ctx: ProviderContext): Promise<ProviderStatus> {
+    const detection = await this.detect(ctx);
     return {
       provider: "kilo",
       availability: detection.available ? "available" : "unavailable",

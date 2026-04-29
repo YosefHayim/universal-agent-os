@@ -189,7 +189,7 @@ function agentGuide(): string {
     "  agent-os upgrade",
     "",
     "Provider notes:",
-    "  direct CLIs: manual, codex, claude, zai, gemini, opencode",
+    "  direct CLIs: manual, codex, claude, zai, gemini, opencode, kilo, cline",
     "  Gemini default can hit capacity on auto-gemini-3; use --model gemini-2.5-flash-lite when needed.",
     "  Cloud API providers need credentials: agent-os providers credentials, or the TUI Provider API keys menu.",
     "",
