@@ -75,6 +75,16 @@ Pause/recovery behavior: `agent-os task pause <taskId>` persists a paused task s
 
 Runtime metadata lives at `.agent-os/runtime.json`. Run `agent-os upgrade` after pulling a newer Agent OS release to apply local runtime migrations explicitly.
 
+## Orchestrator edit guard
+
+The orchestrator edit guard feature blocks direct Edit/Write/MultiEdit/NotebookEdit operations at the orchestrator level. This ensures that file modifications are delegated to agent-os workers and Claude Code subagents.
+
+- **State file path:** The guard's state is stored in `$XDG_CONFIG_HOME/agent-os/orchestrator-block.json` (or `~/.config/agent-os/orchestrator-block.json`).
+- **Default:** The guard is enabled by default.
+- **CLI commands:** Use `agent-os orchestrator-guard {status,on,off,toggle}` to manage the guard.
+- **Per-process bypass:** Set the environment variable `AGENT_OS_GUARD_BYPASS=1` to bypass the guard for a specific process.
+- **Hook script:** A matching hook script is available in `universal-agent-toolkit/hooks/orchestrator-edit-guard.sh`.
+
 ## Development
 
 ```bash

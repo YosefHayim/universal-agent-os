@@ -6,6 +6,7 @@ import { printJson, printTable } from "./format.js";
 import { runInteractive } from "./interactive.js";
 import { writeAgentOsProgress } from "./progress.js";
 import { notifyWorkerFinished } from "../core/notifications.js";
+import { readGuardState, writeGuardState } from "../core/orchestrator-guard.js";
 import { parseCsv } from "./prompts.js";
 
 export function createProgram(): Command {
@@ -76,6 +77,21 @@ Fast path:
       );
       printJson({ ok: true, ...result });
     });
+
+  const guard = program.command("orchestrator-guard").description("Block top-level Edit/Write/MultiEdit calls so file work is delegated to agent-os workers");
+  guard.command("status").description("Show current guard state").action(async () => {
+    printJson(await readGuardState());
+  });
+  guard.command("on").description("Enable the orchestrator edit guard").action(async () => {
+    printJson(await writeGuardState(true));
+  });
+  guard.command("off").description("Disable the orchestrator edit guard").action(async () => {
+    printJson(await writeGuardState(false));
+  });
+  guard.command("toggle").description("Flip the guard between on and off").action(async () => {
+    const current = await readGuardState();
+    printJson(await writeGuardState(!current.enabled));
+  });
 
   addProviders(program);
   addModels(program);

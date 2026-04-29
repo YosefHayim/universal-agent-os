@@ -1,6 +1,7 @@
 import { confirm, input, password, select } from "@inquirer/prompts";
 import { DEFAULT_PROVIDERS, DIRECT_LAUNCH_PROVIDERS, PROVIDER_CREDENTIAL_ENV_VARS } from "../config/defaults.js";
 import { Controller, type TaskRunProgress } from "../core/controller.js";
+import { readGuardState, writeGuardState } from "../core/orchestrator-guard.js";
 import type { ModelCatalogEntry, ProviderAvailability, ProviderId, RiskLevel } from "../core/types.js";
 import { formatUsageLine, type UsageSummaryRow } from "../usage/usage.js";
 import { printTable } from "./format.js";
@@ -26,6 +27,7 @@ export type MainAction =
   | "provider-status"
   | "provider-credentials"
   | "set-provider"
+  | "orchestrator-guard"
   | "quit";
 
 export async function runInteractive(controller = new Controller()): Promise<void> {
@@ -54,6 +56,7 @@ export async function runInteractive(controller = new Controller()): Promise<voi
         { name: "Provider status", value: "provider-status" },
         { name: "Provider API keys", value: "provider-credentials" },
         { name: "Set provider status", value: "set-provider" },
+        { name: "Orchestrator edit guard (toggle)", value: "orchestrator-guard" },
         { name: "Quit", value: "quit" },
       ],
     });
@@ -145,7 +148,28 @@ export async function runAction(controller: Controller, action: MainAction): Pro
   }
   if (action === "set-provider") {
     await setProvider(controller);
+    return;
   }
+  if (action === "orchestrator-guard") {
+    await toggleOrchestratorGuard();
+  }
+}
+
+async function toggleOrchestratorGuard(): Promise<void> {
+  const current = await readGuardState();
+  console.log(`Orchestrator edit guard is currently ${current.enabled ? "ON" : "OFF"} (source: ${current.source}, file: ${current.path})`);
+  const choice = await select<"on" | "off" | "back">({
+    message: "Set orchestrator edit guard",
+    choices: [
+      { name: `Turn ON ${current.enabled ? "(already on)" : ""}`.trim(), value: "on" },
+      { name: `Turn OFF ${!current.enabled ? "(already off)" : ""}`.trim(), value: "off" },
+      { name: "Back", value: "back" },
+    ],
+    default: current.enabled ? "off" : "on",
+  });
+  if (choice === "back") return;
+  const next = await writeGuardState(choice === "on");
+  console.log(`Guard now ${next.enabled ? "ON" : "OFF"} -> ${next.path}`);
 }
 
 async function createTask(controller: Controller): Promise<void> {
