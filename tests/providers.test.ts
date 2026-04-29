@@ -284,11 +284,26 @@ test("weak worker prompt carries principles and anti-hallucination output contra
     weakModel: true,
   });
 
+  assert.match(prompt, /<agent-os-worker-task>/);
+  assert.match(prompt, /<execution-rules>/);
+  assert.match(prompt, /<low-cost-free-worker-system-prompt>/);
+  assert.match(prompt, /<evidence-rules>/);
+  assert.match(prompt, /<examples>/);
   assert.match(prompt, /low-cost\/free worker models/);
   assert.match(prompt, /Do not claim/);
   assert.match(prompt, /Only report files, commands, tests, and outputs you actually observed/);
   assert.match(prompt, /do not add punctuation/);
+  assert.match(prompt, /Prose punctuation after an exact item is not file content/);
+  assert.match(prompt, /pipes are separators/);
   assert.match(prompt, /Missing or blank command output is not passing evidence/);
+  assert.match(prompt, /Allowed globs may point at files or directories that do not exist yet/);
+  assert.match(prompt, /Missing allowed target files or directories are not blockers/);
+  assert.match(prompt, /hallucination-policy: report missing evidence/);
+  assert.match(prompt, /the period before `Use` closes the instruction sentence/);
+  assert.match(prompt, /with no `\|` characters/);
+  assert.match(prompt, /claimedTestsPassed/);
+  assert.match(prompt, /testOutput/);
+  assert.match(prompt, /eval-output\/\*\*/);
   assert.match(prompt, /KISS, YAGNI, DRY/);
   assert.match(prompt, /no TODOs/);
   assert.match(prompt, /Raw JSON only/);
