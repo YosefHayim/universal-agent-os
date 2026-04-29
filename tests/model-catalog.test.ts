@@ -183,12 +183,14 @@ test("catalog filters free coding candidates without exposing non-coding free mo
   );
 });
 
-test("active model source registry includes only cloud provider sources", () => {
+test("active model source registry includes only remote-account provider sources", () => {
   assert.deepEqual(ACTIVE_MODEL_SOURCE_IDS, [
     "codex",
     "claude",
     "zai",
     "opencode",
+    "kilo",
+    "cline",
     "openrouter",
     "github-models",
     "gemini",
