@@ -8,6 +8,7 @@ import { createWorkerId } from "../core/ids.js";
 import { buildRunUsage } from "../usage/usage.js";
 import { captureWorkspaceDiff } from "../workspace/diff.js";
 import { createTempCopy } from "../workspace/temp-copy.js";
+import { directCliErrorMessage } from "./direct-cli-output.js";
 
 export interface ExternalProviderRun {
   worker: WorkerRecord;
@@ -318,11 +319,13 @@ function readableProviderLine(line: string): string {
       result?: string;
       status?: string;
       stats?: unknown;
-      error?: { name?: string; data?: { message?: string } };
+      error?: unknown;
+      message?: unknown;
       usage?: unknown;
     };
-    if (event.error) return `error: ${event.error.data?.message ?? event.error.name ?? "provider error"}`;
-    if (event.type === "error") return `error: ${trimLog(trimmed)}`;
+    if (event.error || event.type === "error") {
+      return `error: ${directCliErrorMessage(event.error) || directCliErrorMessage(event.message) || trimLog(trimmed)}`;
+    }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
       return `agent: ${trimLog(event.item.text)}`;
     }
@@ -372,6 +375,7 @@ async function buildProviderResult(
   if (limited.limited) {
     return { status: "limited", summary: limited.reason ?? `${provider} reported a limit`, changedFiles };
   }
+  if (exitCode !== 0 && parsed.status === "failed") return { ...parsed, changedFiles };
   if (exitCode !== 0) {
     return { status: "failed", summary: `${provider} exited ${exitCode}: ${trimLog(stderr || stdout)}`, changedFiles };
   }

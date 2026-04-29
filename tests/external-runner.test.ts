@@ -80,7 +80,46 @@ test("external runner fails fast when provider output exceeds the configured byt
   }
 });
 
-function fakeExternalAdapter(script: string): ProviderAdapter {
+test("external runner uses parsed provider failure summaries on nonzero exits", async () => {
+  await withTempProject(async (projectDir) => {
+    await mkdir(path.join(projectDir, "src"), { recursive: true });
+    await writeFile(path.join(projectDir, "src", "index.ts"), "export const value = 1;\n", "utf8");
+    const paths = await ensureRuntime(resolveRuntimePaths(projectDir));
+    const task = await createTask("unwrap provider failure", { rootDir: projectDir, allowedFiles: ["src/**"], risk: "low" });
+    const bundle = await compileContext(paths, task);
+    const progress: string[] = [];
+    const nestedError = JSON.stringify({
+      type: "error",
+      message: JSON.stringify({ message: "Unauthorized: Please sign in to Cline before trying again.", providerId: "cline" }),
+    });
+
+    const run = await runExternalProvider({ paths, cwd: projectDir }, task, bundle.bundlePath, fakeExternalAdapter(
+      `process.stdout.write(${JSON.stringify(nestedError + "\n")}); process.exit(1);`,
+      {
+        parseOutput: async () => ({
+          status: "failed",
+          summary: "Unauthorized: Please sign in to Cline before trying again.",
+          changedFiles: [],
+        }),
+      },
+    ), {
+      onProgress: (event) => {
+        if (event.message) progress.push(event.message);
+      },
+    });
+
+    assert.equal(run.result.status, "failed");
+    assert.equal(run.result.summary, "Unauthorized: Please sign in to Cline before trying again.");
+    assert.ok(progress.some((line) => line === "error: Unauthorized: Please sign in to Cline before trying again."));
+    assert.ok(!progress.filter((line) => line.startsWith("error:")).some((line) => /providerId/.test(line)));
+  });
+});
+
+interface FakeExternalAdapterOptions {
+  parseOutput?: ProviderAdapter["parseOutput"];
+}
+
+function fakeExternalAdapter(script: string, options: FakeExternalAdapterOptions = {}): ProviderAdapter {
   return {
     id: "manual",
     async detect(): Promise<ProviderDetection> {
@@ -98,7 +137,8 @@ function fakeExternalAdapter(script: string): ProviderAdapter {
     async buildLaunchCommand(_ctx: ProviderContext, _task: Task, _bundlePath: string) {
       return { command: process.execPath, args: ["-e", script] };
     },
-    async parseOutput(_ctx: ProviderContext, stdout: string): Promise<ProviderResult> {
+    async parseOutput(ctx: ProviderContext, stdout: string, stderr: string): Promise<ProviderResult> {
+      if (options.parseOutput) return options.parseOutput(ctx, stdout, stderr);
       return {
         status: stdout ? "completed" : "failed",
         summary: stdout ? "fake runner completed" : "fake runner produced no stdout",

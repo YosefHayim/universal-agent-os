@@ -16,6 +16,7 @@ import { kiloProvider } from "../src/providers/kilo.js";
 import { manualProvider } from "../src/providers/manual.js";
 import { opencodeProvider, selectOpencodeDefaultModel } from "../src/providers/opencode.js";
 import { cloudCatalogProvider } from "../src/providers/provider-factory.js";
+import { buildWorkerPrompt } from "../src/providers/worker-prompt.js";
 import { zaiProvider } from "../src/providers/zai.js";
 import { mapClineConfigModels, parseClineConfigModelIds } from "../src/models/sources/cline.js";
 import { mapKiloModels, parseKiloModelIds } from "../src/models/sources/kilo.js";
@@ -252,6 +253,8 @@ test("installed coding CLIs build headless auto-edit launch commands", async () 
     assert.ok(kilo.args.includes("--model"));
     assert.ok(kilo.args.includes("kilo/kilo-auto/free"));
     assert.match(kilo.args.join(" "), /isolated workspace/);
+    assert.match(kilo.args.join(" "), /low-cost\/free worker models/);
+    assert.match(kilo.args.join(" "), /Raw JSON only/);
 
     const cline = await clineProvider.buildLaunchCommand(ctx, task, bundlePath, "qwen/qwen3.6-plus-preview:free");
     assert.equal(cline.command, "cline");
@@ -260,7 +263,36 @@ test("installed coding CLIs build headless auto-edit launch commands", async () 
     assert.ok(cline.args.includes("--model"));
     assert.ok(cline.args.includes("qwen/qwen3.6-plus-preview:free"));
     assert.match(cline.args.join(" "), /isolated workspace/);
+    assert.match(cline.args.join(" "), /low-cost\/free worker models/);
+    assert.match(cline.args.join(" "), /Raw JSON only/);
   });
+});
+
+test("weak worker prompt carries principles and anti-hallucination output contract", () => {
+  const task: Task = {
+    id: "task-weak-worker-prompt",
+    goal: "Create src/example.txt with exact content ok",
+    allowedFiles: ["src/**"],
+    risk: "low",
+    createdAt: "2026-04-29T00:00:00.000Z",
+    updatedAt: "2026-04-29T00:00:00.000Z",
+    cwd: "/tmp/project",
+  };
+
+  const prompt = buildWorkerPrompt(task, "/tmp/project/agent-os-bundle.md", {
+    provider: "kilo",
+    weakModel: true,
+  });
+
+  assert.match(prompt, /low-cost\/free worker models/);
+  assert.match(prompt, /Do not claim/);
+  assert.match(prompt, /Only report files, commands, tests, and outputs you actually observed/);
+  assert.match(prompt, /KISS, YAGNI, DRY/);
+  assert.match(prompt, /no TODOs/);
+  assert.match(prompt, /Raw JSON only/);
+  assert.match(prompt, /no markdown fences/);
+  assert.match(prompt, /allowed files/i);
+  assert.doesNotMatch(prompt, /\n{3,}/);
 });
 
 test("opencode default model selection avoids stale config and output errors are failures", async () => {
@@ -384,6 +416,26 @@ test("kilo and cline parsers handle JSON events and failures", async () => {
   assert.match(kiloFailure.summary, /Model not found/);
   assert.equal(clineFailure.status, "failed");
   assert.match(clineFailure.summary, /Model not found/);
+});
+
+test("cline parser unwraps nested auth errors from free-model runner output", async () => {
+  const stdout = [
+    JSON.stringify({ type: "task_started", taskId: "task-unauthorized" }),
+    JSON.stringify({
+      type: "error",
+      message: JSON.stringify({
+        message: "Unauthorized: Please sign in to Cline before trying again.",
+        providerId: "cline",
+        modelId: "qwen/qwen3.6-plus-preview:free",
+      }),
+    }),
+  ].join("\n");
+
+  const parsed = await clineProvider.parseOutput({} as never, stdout, "");
+
+  assert.equal(parsed.status, "failed");
+  assert.match(parsed.summary, /Unauthorized: Please sign in to Cline/);
+  assert.doesNotMatch(parsed.summary, /\\\"providerId\\\"/);
 });
 
 test("direct CLI dry-run accepts an uncached explicit model id", async () => {
