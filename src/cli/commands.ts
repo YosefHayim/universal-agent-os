@@ -153,8 +153,14 @@ function addTasks(program: Command): void {
   task.command("review").description("Create reviewer packet from diff/log evidence").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskReview(taskId)));
   task.command("accept").description("Record accepted validation decision").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskAccept(taskId)));
   task.command("reject").description("Record rejection").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskReject(taskId)));
+  task.command("pause").description("Pause a task until it is resumed").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskPause(taskId)));
   task.command("cancel").description("Record cancellation").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskCancel(taskId)));
   task.command("resume").description("Mark task ready to resume").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskResume(taskId)));
+  task.command("recover")
+    .description("Scan running task heartbeats and restore completed or stale state")
+    .argument("[taskId]", "scan all tasks when omitted")
+    .option("--stale-after-ms <ms>", "milliseconds without heartbeat before stale", String(5 * 60 * 1000))
+    .action(async (taskId, opts) => printJson(await controller(program).taskRecover(taskId, { staleAfterMs: parsePositiveInt(opts.staleAfterMs, "stale-after-ms") })));
   task.command("rollback").description("Record rollback intent; worker workspace remains for inspection").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskRollback(taskId)));
 }
 
@@ -177,6 +183,7 @@ function agentGuide(): string {
     "  agent-os task validate \"$task_id\"",
     "  agent-os task diff \"$task_id\"",
     "  agent-os task logs \"$task_id\"",
+    "  agent-os task recover \"$task_id\"",
     "  agent-os queue status",
     "  agent-os usage",
     "  agent-os upgrade",
@@ -189,6 +196,7 @@ function agentGuide(): string {
     "Important behavior:",
     "  Providers edit an isolated worker copy. Agent OS captures the diff, logs, validation, and usage.",
     "  The context bundle is ranked by task relevance, saves lower-ranked files as summaries when the byte budget is tight, and is announced in [universal-agent-os] progress output.",
+    "  Use agent-os task pause <taskId>, agent-os task resume <taskId>, and agent-os task recover [taskId] to keep task progress recoverable across interrupted runs.",
     "  Runtime metadata lives in .agent-os/runtime.json; run agent-os upgrade after pulling a newer Agent OS release.",
     "  Inspect changes with agent-os task diff <taskId> and the worker path in task logs/status.",
   ].join("\n");
@@ -211,4 +219,10 @@ function asAvailability(value: string): ProviderAvailability {
 function asRisk(value: string): RiskLevel {
   if (["low", "medium", "high"].includes(value)) return value as RiskLevel;
   throw new Error(`Unknown risk: ${value}`);
+}
+
+function parsePositiveInt(value: string, label: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  throw new Error(`${label} must be a positive integer`);
 }

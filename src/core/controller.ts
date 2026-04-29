@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_PROVIDERS, DIRECT_LAUNCH_PROVIDERS } from "../config/defaults.js";
 import {
@@ -13,7 +13,7 @@ import {
   setProviderCredential,
   upgradeRuntimeLayout,
 } from "../config/config-loader.js";
-import type { ProviderAvailability, ProviderId, RiskLevel, RuntimePaths, SourceKind, Task, TaskPlan, TaskState, ValidationResult } from "./types.js";
+import type { ProviderAvailability, ProviderId, ProviderResult, RiskLevel, RuntimePaths, SourceKind, Task, TaskPlan, TaskState, ValidationResult } from "./types.js";
 import { appendEvent, readTaskEvents } from "./events.js";
 import { compileContext } from "../context/compiler.js";
 import { listModels, modelsDoctor, refreshModels } from "../models/index.js";
@@ -61,6 +61,25 @@ export interface ProviderHealthRow {
   cloudHosted: boolean;
   checkedAt: string;
 }
+
+export interface TaskRecoveryOptions {
+  staleAfterMs?: number;
+  now?: Date;
+}
+
+export interface TaskRecoveryItem {
+  taskId: string;
+  previousStatus: TaskState["status"];
+  status: TaskState["status"];
+  action: "skipped" | "fresh" | "marked_stale" | "restored_completed" | "restored_failed";
+  reason: string;
+  workerId?: string;
+  heartbeatPath?: string;
+  resumeCommand?: string;
+  runCommand?: string;
+}
+
+const DEFAULT_STALE_AFTER_MS = 5 * 60 * 1000;
 
 export class Controller {
   readonly paths: RuntimePaths;
@@ -241,13 +260,19 @@ export class Controller {
 
   async queuePause(taskId?: string): Promise<QueueItem> {
     await this.init();
-    return this.queue().pause(await this.resolveTaskId(taskId));
+    const id = await this.resolveTaskId(taskId);
+    const current = await readState(this.paths, id);
+    ensurePausableStatus(id, current.status);
+    await updateState(this.paths, id, "paused", { message: "paused by user" });
+    return this.queue().pause(id);
   }
 
   async queueResume(taskId?: string): Promise<QueueItem> {
     await this.init();
     const id = await this.resolveTaskId(taskId);
-    await updateState(this.paths, id, "planned", { message: "ready to resume" });
+    const current = await readState(this.paths, id);
+    ensureResumableStatus(id, current.status);
+    await updateState(this.paths, id, "planned", { workerId: undefined, message: "ready to resume" });
     return this.queue().resume(id);
   }
 
@@ -256,6 +281,16 @@ export class Controller {
     const id = await this.resolveTaskId(taskId);
     await updateState(this.paths, id, "cancelled", { message: "cancelled by user" });
     return this.queue().cancel(id);
+  }
+
+  async taskPause(taskId?: string): Promise<TaskState> {
+    await this.init();
+    const id = await this.resolveTaskId(taskId);
+    const current = await readState(this.paths, id);
+    ensurePausableStatus(id, current.status);
+    const state = await updateState(this.paths, id, "paused", { message: "paused by user" });
+    await this.queue().pause(id);
+    return state;
   }
 
   async taskPlan(taskId?: string): Promise<TaskPlan> {
@@ -364,6 +399,10 @@ export class Controller {
     const id = await this.resolveTaskId(taskId);
     const dir = taskDir(this.paths, id);
     return withTaskLock(dir, async () => {
+      const currentState = await readState(this.paths, id);
+      if (currentState.status === "paused") {
+        throw new Error(`Task ${id} is paused. Run agent-os task resume ${id} before task run.`);
+      }
       const task = await readTask(this.paths, id);
       const bundle = await compileContext(this.paths, task);
       await appendEvent(taskDir(this.paths, id), { taskId: id, event: "context_compiled", message: `${bundle.selectedFiles.length} files selected` });
@@ -433,6 +472,14 @@ export class Controller {
         const run = await runExternalProvider({ paths: this.paths, cwd: this.paths.rootDir }, task, bundle.bundlePath, adapter, {
           modelId: selectedModelId,
           onProgress: async (event) => {
+            if (event.event === "worker_prepared") {
+              await updateState(this.paths, id, "running", {
+                provider: event.provider,
+                workerId: event.workerId,
+                modelId: selectedModelId,
+                message: "worker prepared",
+              });
+            }
             if (event.event !== "provider_output" && event.event !== "provider_error_output") {
               await appendEvent(taskDir(this.paths, id), {
                 taskId: id,
@@ -593,9 +640,23 @@ export class Controller {
   async taskResume(taskId?: string): Promise<TaskState> {
     await this.init();
     const id = await this.resolveTaskId(taskId);
-    const state = await updateState(this.paths, id, "planned", { message: "ready to resume" });
+    const current = await readState(this.paths, id);
+    ensureResumableStatus(id, current.status);
+    const state = await updateState(this.paths, id, "planned", { workerId: undefined, message: "ready to resume" });
     await this.queue().resume(id);
     return state;
+  }
+
+  async taskRecover(taskId?: string, options: TaskRecoveryOptions = {}): Promise<{ rootDir: string; staleAfterMs: number; recovered: TaskRecoveryItem[] }> {
+    await this.init();
+    const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+    const now = options.now ?? new Date();
+    const ids = taskId ? [taskId] : await listTaskIds(this.paths);
+    const recovered: TaskRecoveryItem[] = [];
+    for (const id of ids) {
+      recovered.push(await this.recoverTask(id, staleAfterMs, now));
+    }
+    return { rootDir: this.paths.rootDir, staleAfterMs, recovered };
   }
 
   async taskRollback(taskId?: string): Promise<TaskState> {
@@ -604,6 +665,106 @@ export class Controller {
     const state = await updateState(this.paths, id, "planned", { message: "rollback recorded; isolated workspace left for inspection" });
     await this.queue().update(id, "planned", "rollback recorded; isolated workspace left for inspection");
     return state;
+  }
+
+  private async recoverTask(taskId: string, staleAfterMs: number, now: Date): Promise<TaskRecoveryItem> {
+    const state = await readState(this.paths, taskId);
+    const base = {
+      taskId,
+      previousStatus: state.status,
+      resumeCommand: `agent-os task resume ${taskId}`,
+      runCommand: `agent-os task run ${taskId}`,
+    };
+
+    if (state.status !== "running") {
+      return {
+        ...base,
+        status: state.status,
+        action: "skipped",
+        reason: `task is ${state.status}, not running`,
+      };
+    }
+
+    const worker = await this.findRecoveryWorker(taskId, state.workerId);
+    if (!worker) {
+      const updatedAtMs = Date.parse(state.updatedAt);
+      const ageMs = Number.isNaN(updatedAtMs) ? Number.POSITIVE_INFINITY : now.getTime() - updatedAtMs;
+      if (ageMs > staleAfterMs) {
+        const reason = "running task has no worker heartbeat";
+        const stale = await updateState(this.paths, taskId, "stale", { message: reason });
+        await this.queue().update(taskId, "stale", reason);
+        return { ...base, status: stale.status, action: "marked_stale", reason };
+      }
+      return { ...base, status: state.status, action: "fresh", reason: "running task has no heartbeat yet but is inside the stale window" };
+    }
+
+    if (worker.result) {
+      const restoredStatus = worker.result.status === "completed" ? "completed" : "failed";
+      const restored = await updateState(this.paths, taskId, restoredStatus, {
+        provider: state.provider,
+        workerId: worker.workerId,
+        modelId: state.modelId,
+        message: worker.result.summary,
+      });
+      await this.queue().update(taskId, restoredStatus, worker.result.summary);
+      return {
+        ...base,
+        status: restored.status,
+        action: restoredStatus === "completed" ? "restored_completed" : "restored_failed",
+        reason: "worker result artifact survived controller exit",
+        workerId: worker.workerId,
+        heartbeatPath: worker.heartbeatPath,
+      };
+    }
+
+    const heartbeatStatus = stringValue(worker.heartbeat?.status);
+    const heartbeatTime = heartbeatTimestampMs(worker.heartbeat, state.updatedAt);
+    const heartbeatAgeMs = heartbeatTime === undefined ? Number.POSITIVE_INFINITY : now.getTime() - heartbeatTime;
+    if (heartbeatStatus && heartbeatStatus !== "running") {
+      const reason = `worker heartbeat is ${heartbeatStatus} but no result artifact exists`;
+      const stale = await updateState(this.paths, taskId, "stale", {
+        provider: state.provider,
+        workerId: worker.workerId,
+        modelId: state.modelId,
+        message: reason,
+      });
+      await this.queue().update(taskId, "stale", reason);
+      return { ...base, status: stale.status, action: "marked_stale", reason, workerId: worker.workerId, heartbeatPath: worker.heartbeatPath };
+    }
+
+    if (heartbeatAgeMs > staleAfterMs) {
+      const reason = `worker heartbeat stale for ${Math.round(heartbeatAgeMs / 1000)}s`;
+      const stale = await updateState(this.paths, taskId, "stale", {
+        provider: state.provider,
+        workerId: worker.workerId,
+        modelId: state.modelId,
+        message: reason,
+      });
+      await this.queue().update(taskId, "stale", reason);
+      return { ...base, status: stale.status, action: "marked_stale", reason, workerId: worker.workerId, heartbeatPath: worker.heartbeatPath };
+    }
+
+    return {
+      ...base,
+      status: state.status,
+      action: "fresh",
+      reason: "worker heartbeat is fresh",
+      workerId: worker.workerId,
+      heartbeatPath: worker.heartbeatPath,
+    };
+  }
+
+  private async findRecoveryWorker(taskId: string, preferredWorkerId?: string): Promise<RecoveryWorker | undefined> {
+    const workersDir = join(taskDir(this.paths, taskId), "workers");
+    const workerIds = preferredWorkerId ? [preferredWorkerId] : await workerDirectoryNames(workersDir);
+    for (const workerId of workerIds) {
+      const workerDir = join(workersDir, workerId);
+      const heartbeatPath = join(workerDir, "heartbeat.json");
+      const heartbeat = await readJsonIfExists<Record<string, unknown>>(heartbeatPath);
+      const result = await readJsonIfExists<ProviderResult>(join(workerDir, "result.json"));
+      if (heartbeat || result) return { workerId, heartbeatPath, heartbeat, result };
+    }
+    return undefined;
   }
 
   private async resolveTaskId(taskId?: string): Promise<string> {
@@ -616,6 +777,55 @@ export class Controller {
   private queue(): TaskQueue {
     return new TaskQueue(this.paths);
   }
+}
+
+interface RecoveryWorker {
+  workerId: string;
+  heartbeatPath: string;
+  heartbeat?: Record<string, unknown>;
+  result?: ProviderResult;
+}
+
+async function workerDirectoryNames(workersDir: string): Promise<string[]> {
+  try {
+    return (await readdir(workersDir, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+  } catch {
+    return [];
+  }
+}
+
+async function readJsonIfExists<T>(path: string): Promise<T | undefined> {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function heartbeatTimestampMs(heartbeat: Record<string, unknown> | undefined, fallback: string): number | undefined {
+  const raw = heartbeat
+    ? stringValue(heartbeat.checkedAt) ?? stringValue(heartbeat.lastOutputAt) ?? stringValue(heartbeat.timestamp) ?? stringValue(heartbeat.updatedAt)
+    : undefined;
+  const parsed = Date.parse(raw ?? fallback);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function ensurePausableStatus(taskId: string, status: TaskState["status"]): void {
+  if (!["completed", "validated", "reviewed", "accepted", "rejected", "cancelled"].includes(status)) return;
+  throw new Error(`Cannot pause task ${taskId} from ${status}. Only active or resumable tasks can be paused.`);
+}
+
+function ensureResumableStatus(taskId: string, status: TaskState["status"]): void {
+  if (["paused", "stale", "failed", "cancelled"].includes(status)) return;
+  throw new Error(`Cannot resume task ${taskId} from ${status}. Only paused, stale, failed, or cancelled tasks can be resumed.`);
 }
 
 export interface CreateTaskInput {
@@ -727,8 +937,16 @@ export class AgentOsController {
     return new Controller({ rootDir: this.config.cwd }).taskCancel(taskId);
   }
 
+  async pauseTask(taskId: string): Promise<TaskState> {
+    return new Controller({ rootDir: this.config.cwd }).taskPause(taskId);
+  }
+
   async resumeTask(taskId: string): Promise<TaskState> {
     return new Controller({ rootDir: this.config.cwd }).taskResume(taskId);
+  }
+
+  async recoverTask(taskId?: string, options: TaskRecoveryOptions = {}): Promise<unknown> {
+    return new Controller({ rootDir: this.config.cwd }).taskRecover(taskId, options);
   }
 
   async rollbackTask(taskId: string): Promise<TaskState> {

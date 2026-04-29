@@ -20,6 +20,7 @@ export type TaskStatus =
   | "planned"
   | "dry_run"
   | "running"
+  | "paused"
   | "completed"
   | "validated"
   | "reviewed"

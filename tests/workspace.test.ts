@@ -164,3 +164,42 @@ test("heartbeat helper detects stale workers", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("heartbeat helper accepts external runner checkedAt and finished status", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "agent-os-heartbeat-runner-"));
+
+  try {
+    const file = path.join(dir, "heartbeat.json");
+    await writeFile(file, JSON.stringify({
+      taskId: "task-4",
+      workerId: "worker-4",
+      status: "running",
+      checkedAt: "2026-04-28T00:00:10.000Z",
+    }, null, 2));
+
+    assert.equal(
+      await isHeartbeatStale(file, {
+        now: new Date("2026-04-28T00:00:20.000Z"),
+        staleAfterMs: 30_000,
+      }),
+      false,
+    );
+
+    await writeFile(file, JSON.stringify({
+      taskId: "task-4",
+      workerId: "worker-4",
+      status: "finished",
+      checkedAt: "2026-04-28T00:00:20.000Z",
+    }, null, 2));
+
+    assert.equal(
+      await isHeartbeatStale(file, {
+        now: new Date("2026-04-28T00:20:20.000Z"),
+        staleAfterMs: 30_000,
+      }),
+      false,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -3,8 +3,11 @@ import { readFile, writeFile } from "node:fs/promises";
 export interface HeartbeatRecord {
   taskId: string;
   workerId: string;
-  status: "running" | "completed" | "failed" | "cancelled" | "stale";
-  timestamp: string;
+  status: "running" | "completed" | "finished" | "failed" | "cancelled" | "stale" | "exited";
+  timestamp?: string;
+  checkedAt?: string;
+  updatedAt?: string;
+  lastOutputAt?: string;
   message?: string;
 }
 
@@ -32,7 +35,8 @@ export async function isHeartbeatStale(
   }
 
   const now = options.now ?? new Date();
-  const timestamp = new Date(heartbeat.timestamp);
+  const rawTimestamp = heartbeat.timestamp ?? heartbeat.checkedAt ?? heartbeat.updatedAt ?? heartbeat.lastOutputAt;
+  const timestamp = new Date(rawTimestamp ?? "");
 
   if (Number.isNaN(timestamp.getTime())) {
     return true;

@@ -52,6 +52,7 @@ test("CLI can create and complete a manual task in any project directory", async
     const help = runCli(projectDir, []);
     const guide = runCli(projectDir, ["guide"]);
     const taskRunHelp = runCli(projectDir, ["task", "run", "--help"]);
+    const taskHelp = runCli(projectDir, ["task", "--help"]);
     const doctor = JSON.parse(runCli(projectDir, ["doctor"]));
     const providersStatus = JSON.parse(runCli(projectDir, ["providers", "status"]));
     const passthroughStatus = JSON.parse(runCli(projectDir, ["--", "providers", "status"]));
@@ -79,6 +80,7 @@ test("CLI can create and complete a manual task in any project directory", async
     const listed = JSON.parse(runCli(projectDir, ["task", "list"]));
     const events = JSON.parse(runCli(projectDir, ["task", "events", created.id]));
     const status = JSON.parse(runCli(projectDir, ["task", "status", created.id]));
+    const recover = JSON.parse(runCli(projectDir, ["task", "recover", created.id]));
     const queue = JSON.parse(runCli(projectDir, ["queue", "status"]));
     const taskDir = path.join(projectDir, ".agent-os", "tasks", created.id);
     const telemetry = await readFile(path.join(projectDir, ".agent-os", "telemetry.ndjson"), "utf8");
@@ -89,6 +91,8 @@ test("CLI can create and complete a manual task in any project directory", async
     assert.match(guide, /Agent OS quick runbook/);
     assert.match(guide, /gemini-2\.5-flash-lite/);
     assert.match(taskRunHelp, /isolated worker copy/);
+    assert.match(taskHelp, /pause \[taskId\]/);
+    assert.match(taskHelp, /recover \[options\] \[taskId\]/);
     assert.equal(doctor.ok, true);
     assert.ok(Array.isArray(providersStatus.providers));
     assert.equal(typeof passthroughStatus.providers.find((row: { provider: string }) => row.provider === "opencode")?.launchMode, "string");
@@ -107,10 +111,35 @@ test("CLI can create and complete a manual task in any project directory", async
     assert.equal(listed[0].taskId, created.id);
     assert.ok(events.events.some((event: { event: string }) => event.event === "task_completed"));
     assert.equal(status.status, "completed");
+    assert.equal(recover.recovered[0].action, "skipped");
     assert.equal(queue.items.find((item: { taskId: string }) => item.taskId === created.id)?.status, "completed");
     assert.match(telemetry, /"agent_os\.task\.id"/);
     assert.equal(typeof contextFiles.budgetBytes, "number");
     assert.ok(Array.isArray(contextFiles.files));
+  });
+});
+
+test("CLI pause blocks accidental run until resume", async () => {
+  await withTempProject(async (projectDir) => {
+    const created = JSON.parse(runCli(projectDir, [
+      "task",
+      "create",
+      "prove pause blocks rerun",
+      "--allowed-files",
+      "src/**",
+      "--risk",
+      "low",
+    ]));
+    const paused = JSON.parse(runCli(projectDir, ["task", "pause", created.id]));
+    const blocked = runCliRaw(projectDir, ["task", "run", created.id, "--provider", "manual"]);
+    const resumed = JSON.parse(runCli(projectDir, ["task", "resume", created.id]));
+    const completed = JSON.parse(runCli(projectDir, ["task", "run", created.id, "--provider", "manual"]));
+
+    assert.equal(paused.status, "paused");
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stderr, /paused/);
+    assert.equal(resumed.status, "planned");
+    assert.equal(completed.status, "completed");
   });
 });
 

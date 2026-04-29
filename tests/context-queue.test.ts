@@ -7,8 +7,9 @@ import test from "node:test";
 import { ensureRuntime, resolveRuntimePaths } from "../src/config/config-loader.js";
 import { fileSummaryCachePath } from "../src/context/cache-layout.js";
 import { compileContext } from "../src/context/compiler.js";
+import { Controller } from "../src/core/controller.js";
 import { TaskQueue } from "../src/core/queue.js";
-import { createTask } from "../src/core/lifecycle.js";
+import { createTask, readState, taskDir, updateState } from "../src/core/lifecycle.js";
 
 async function withTempProject<T>(fn: (projectDir: string) => Promise<T>): Promise<T> {
   const projectDir = await mkdtemp(path.join(tmpdir(), "agent-os-context-queue-"));
@@ -40,6 +41,122 @@ test("task queue persists lifecycle controls across instances", async () => {
     assert.equal(taskA.status, "cancelled");
     assert.equal(taskA.message, "cancelled by user");
     assert.equal(state.items.length, 2);
+  });
+});
+
+test("controller pause and resume persist task state with queue state", async () => {
+  await withTempProject(async (projectDir) => {
+    const controller = await Controller.create({ rootDir: projectDir });
+    const created = await controller.taskCreate("pause resumable work", {
+      allowedFiles: ["src/**"],
+      risk: "low",
+    });
+    const taskId = String(created.id);
+
+    const paused = await controller.queuePause(taskId);
+    const pausedState = await readState(controller.paths, taskId);
+    const blockedRun = await controller.taskRun(taskId, "manual").then(
+      () => "unexpected success",
+      (error: unknown) => error instanceof Error ? error.message : String(error),
+    );
+
+    assert.equal(paused.status, "paused");
+    assert.equal(pausedState.status, "paused");
+    assert.match(blockedRun, /paused/);
+
+    const resumed = await controller.taskResume(taskId);
+    const queue = await controller.queueStatus();
+
+    assert.equal(resumed.status, "planned");
+    assert.equal(queue.items.find((item) => item.taskId === taskId)?.status, "planned");
+  });
+});
+
+test("controller resume refuses terminal tasks", async () => {
+  await withTempProject(async (projectDir) => {
+    const controller = await Controller.create({ rootDir: projectDir });
+    const created = await controller.taskCreate("do not regress completed work", {
+      allowedFiles: ["src/**"],
+      risk: "low",
+    });
+    const taskId = String(created.id);
+    await updateState(controller.paths, taskId, "completed", { message: "done" });
+
+    const resumeResult = await controller.taskResume(taskId).then(
+      () => "unexpected success",
+      (error: unknown) => error instanceof Error ? error.message : String(error),
+    );
+    const pauseResult = await controller.taskPause(taskId).then(
+      () => "unexpected success",
+      (error: unknown) => error instanceof Error ? error.message : String(error),
+    );
+    const state = await readState(controller.paths, taskId);
+
+    assert.match(resumeResult, /Cannot resume/);
+    assert.match(pauseResult, /Cannot pause/);
+    assert.equal(state.status, "completed");
+  });
+});
+
+test("controller recovery marks stale running workers and restores completed artifacts", async () => {
+  await withTempProject(async (projectDir) => {
+    const controller = await Controller.create({ rootDir: projectDir });
+    const staleTask = await controller.taskCreate("recover stale worker", {
+      allowedFiles: ["src/**"],
+      risk: "low",
+    });
+    const completeTask = await controller.taskCreate("recover completed worker", {
+      allowedFiles: ["src/**"],
+      risk: "low",
+    });
+    const staleTaskId = String(staleTask.id);
+    const completeTaskId = String(completeTask.id);
+
+    await updateState(controller.paths, staleTaskId, "running", {
+      provider: "codex",
+      workerId: "codex-old",
+      message: "worker started",
+    });
+    const staleWorkerDir = path.join(taskDir(controller.paths, staleTaskId), "workers", "codex-old");
+    await mkdir(staleWorkerDir, { recursive: true });
+    await writeFile(path.join(staleWorkerDir, "heartbeat.json"), JSON.stringify({
+      taskId: staleTaskId,
+      workerId: "codex-old",
+      status: "running",
+      checkedAt: "2026-04-28T00:00:00.000Z",
+    }, null, 2));
+
+    await updateState(controller.paths, completeTaskId, "running", {
+      provider: "claude",
+      workerId: "claude-done",
+      message: "worker started",
+    });
+    const completeWorkerDir = path.join(taskDir(controller.paths, completeTaskId), "workers", "claude-done");
+    await mkdir(completeWorkerDir, { recursive: true });
+    await writeFile(path.join(completeWorkerDir, "heartbeat.json"), JSON.stringify({
+      taskId: completeTaskId,
+      workerId: "claude-done",
+      status: "finished",
+      checkedAt: "2026-04-28T00:00:20.000Z",
+    }, null, 2));
+    await writeFile(path.join(completeWorkerDir, "result.json"), JSON.stringify({
+      status: "completed",
+      summary: "survived controller crash",
+      changedFiles: ["src/recovered.ts"],
+    }, null, 2));
+
+    const report = await controller.taskRecover(undefined, {
+      staleAfterMs: 30_000,
+      now: new Date("2026-04-28T00:02:00.000Z"),
+    });
+    const staleState = await readState(controller.paths, staleTaskId);
+    const completeState = await readState(controller.paths, completeTaskId);
+
+    assert.equal(staleState.status, "stale");
+    assert.equal(completeState.status, "completed");
+    assert.equal(report.recovered.find((item) => item.taskId === staleTaskId)?.action, "marked_stale");
+    assert.equal(report.recovered.find((item) => item.taskId === completeTaskId)?.action, "restored_completed");
+    assert.match(String(report.recovered.find((item) => item.taskId === staleTaskId)?.resumeCommand), /agent-os task resume/);
   });
 });
 
