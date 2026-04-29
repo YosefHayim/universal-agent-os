@@ -19,6 +19,15 @@ import { compileContext } from "../context/compiler.js";
 import { listModels, modelsDoctor, refreshModels } from "../models/index.js";
 import { runExternalProvider, type ExternalProviderProgress } from "../providers/external-runner.js";
 import { runManualProvider, runManualTask } from "../providers/manual.js";
+import { notifyWorkerFinished } from "./notifications.js";
+
+async function safeNotify(rootDir: string, event: { taskId: string; workerId: string; provider: string; status: string; durationMs: number; message: string }): Promise<void> {
+  try {
+    await notifyWorkerFinished({ rootDir }, event);
+  } catch (error) {
+    console.error(`[agent-os] notification failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 import { providerAdapter } from "../providers/registry.js";
 import { buildReviewerInput } from "../review/delta-review.js";
 import { judgeMerge } from "../review/merge-judge.js";
@@ -502,6 +511,16 @@ export class Controller {
                 },
               });
             }
+            if (event.event === "worker_finished") {
+              await safeNotify(this.paths.rootDir, {
+                taskId: id,
+                workerId: event.workerId,
+                provider: event.provider,
+                status: "worker_finished",
+                durationMs: event.durationMs ?? 0,
+                message: event.message ?? "",
+              });
+            }
             await options.onProgress?.(event);
           },
         });
@@ -520,6 +539,16 @@ export class Controller {
             "agent_os.patch.bytes": Buffer.byteLength(run.patch),
           },
         });
+        if (taskStatus === "completed") {
+          await safeNotify(this.paths.rootDir, {
+            taskId: id,
+            workerId: run.worker.workerId,
+            provider: route.provider,
+            status: "task_completed",
+            durationMs: run.durationMs,
+            message: run.result.summary,
+          });
+        }
         if (run.result.status !== "completed") throw new Error(run.result.summary);
         return {
           taskId: id,
@@ -558,6 +587,14 @@ export class Controller {
         usage,
         attributes: { "agent_os.message": run.result.summary },
       });
+      await safeNotify(this.paths.rootDir, {
+        taskId: id,
+        workerId: run.worker.workerId,
+        provider: "manual",
+        status: "worker_finished",
+        durationMs,
+        message: run.result.summary,
+      });
       await options.onProgress?.(manualFinished);
       await updateState(this.paths, id, "completed", { provider: route.provider, workerId: run.worker.workerId, message: run.result.summary });
       await this.queue().update(id, "completed", run.result.summary);
@@ -568,6 +605,14 @@ export class Controller {
         name: "task_completed",
         durationMs,
         usage,
+      });
+      await safeNotify(this.paths.rootDir, {
+        taskId: id,
+        workerId: run.worker.workerId,
+        provider: route.provider,
+        status: "task_completed",
+        durationMs,
+        message: run.result.summary,
       });
       return { taskId: id, status: "completed", provider: route.provider, workerId: run.worker.workerId, result: run.result, patchBytes: 0, durationMs, usage };
     });

@@ -8,6 +8,13 @@ export const CACHE_DIR_NAME = "cache";
 export const MODEL_CACHE_DIR_NAME = "models";
 export const PROVIDER_STATUS_FILE = "provider-status.json";
 export const QUEUE_FILE = "queue.json";
+export const NOTIFICATIONS_CONFIG_FILE = "notifications.json";
+
+export const DEFAULT_NOTIFICATION_CONFIG = {
+  wakeFiles: true,
+  bell: true,
+  commands: [],
+};
 
 export const MODEL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 

@@ -54,6 +54,23 @@ Cloud API catalog providers need credentials through `agent-os providers credent
 
 Important behavior: providers edit an isolated worker copy. Agent OS saves a task-ranked context bundle before launch, uses file summaries when the byte budget is tight, captures diff, logs, validation, and token usage under `.agent-os/`, and announces those phases with the `[universal-agent-os]` tag; inspect the captured patch with `agent-os task diff <taskId>`.
 
+## Worker completion notifications
+
+Agent OS can notify external orchestrators when a worker or task finishes.
+
+- **Configuration:** Notifications are configured in `.agent-os/config/notifications.json`. The default configuration is:
+  ```json
+  {
+    "wakeFiles": true,
+    "bell": true,
+    "commands": []
+  }
+  ```
+- **Wake Files:** If `wakeFiles` is `true`, a JSON file is written to `.agent-os/wakeups/<taskId>-<workerId>.json` upon worker completion. This file contains the event payload and a `finishedAt` timestamp.
+- **Bell:** If `bell` is `true` and the terminal is TTY, the BEL character (`\u0007`) is written to stderr.
+- **Commands:** Commands listed in the `commands` array are spawned as detached processes with environment variables `AGENT_OS_TASK_ID`, `AGENT_OS_WORKER_ID`, `AGENT_OS_PROVIDER`, `AGENT_OS_STATUS`, `AGENT_OS_DURATION_MS`, and `AGENT_OS_MESSAGE`.
+- **Test Command:** Use `agent-os notifications test` to fire a synthetic notification and view the results.
+
 Pause/recovery behavior: `agent-os task pause <taskId>` persists a paused task state and blocks accidental reruns until `agent-os task resume <taskId>` is called. `agent-os task recover [taskId]` scans running task heartbeats, restores completed/failed state when a worker `result.json` survived a controller crash, and marks stale running workers as `stale` with explicit resume/run commands in the JSON report.
 
 Runtime metadata lives at `.agent-os/runtime.json`. Run `agent-os upgrade` after pulling a newer Agent OS release to apply local runtime migrations explicitly.

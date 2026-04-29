@@ -5,6 +5,7 @@ import { Controller } from "../core/controller.js";
 import { printJson, printTable } from "./format.js";
 import { runInteractive } from "./interactive.js";
 import { writeAgentOsProgress } from "./progress.js";
+import { notifyWorkerFinished } from "../core/notifications.js";
 import { parseCsv } from "./prompts.js";
 
 export function createProgram(): Command {
@@ -55,6 +56,26 @@ Fast path:
   program.command("guide").description("Print the short runbook for agents").action(() => {
     console.log(agentGuide());
   });
+
+  program.command("notifications")
+    .description("Test worker completion notifications")
+    .command("test")
+    .action(async () => {
+      const paths = (new Controller({ rootDir: process.cwd() })).paths;
+      const syntheticEvent = {
+        taskId: "test",
+        workerId: "test",
+        provider: "manual",
+        status: "completed",
+        durationMs: 0,
+        message: "notification test",
+      };
+      const result = await notifyWorkerFinished(
+        { rootDir: paths.rootDir },
+        syntheticEvent,
+      );
+      printJson({ ok: true, ...result });
+    });
 
   addProviders(program);
   addModels(program);
@@ -203,7 +224,7 @@ function agentGuide(): string {
 }
 
 function controller(_program: Command): Controller {
-  return new Controller();
+  return new Controller({ rootDir: process.cwd() });
 }
 
 function asProvider(value: string): ProviderId {
