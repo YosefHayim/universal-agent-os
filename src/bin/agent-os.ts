@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { createProgram } from "../cli/commands.js";
+import { installSignalHandlers } from "../core/worker-cleanup.js";
 
 async function main(): Promise<void> {
+  installSignalHandlers();
   await createProgram().parseAsync(normalizeArgv(process.argv));
 }
 

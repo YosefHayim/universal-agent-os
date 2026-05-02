@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { MissingModelRouteError } from "../routing/broker.js";
 import { DEFAULT_PROVIDERS } from "../config/defaults.js";
 import type { ProviderAvailability, ProviderId, RiskLevel } from "../core/types.js";
 import { Controller } from "../core/controller.js";
@@ -8,6 +9,8 @@ import { writeAgentOsProgress } from "./progress.js";
 import { notifyWorkerFinished } from "../core/notifications.js";
 import { readGuardState, writeGuardState } from "../core/orchestrator-guard.js";
 import { parseCsv } from "./prompts.js";
+import { isFirstRun } from "./onboarding/marker.js";
+import { runOnboarding } from "./onboarding/runner.js";
 
 export function createProgram(): Command {
   const program = new Command();
@@ -28,15 +31,40 @@ Fast path:
 `);
   program.action(async () => {
     if (process.stdin.isTTY && process.stdout.isTTY) {
+      if (await isFirstRun()) {
+        await runOnboarding({ autoTriggered: true });
+        return;
+      }
       await runInteractive();
       return;
     }
     program.outputHelp();
   });
 
+  program.command("onboarding")
+    .description("Interactive first-run walkthrough (orchestrator/worker model, providers, demo task)")
+    .option("--skip-handson", "skip the live demo task and only show concepts")
+    .action(async (opts: { skipHandson?: boolean }) => {
+      await runOnboarding({ skipHandson: Boolean(opts.skipHandson) });
+    });
+
   program.command("interactive").alias("ui").description("Open the interactive Agent OS terminal").action(async () => {
     await runInteractive();
   });
+  program.command("watch")
+    .description("Live cross-repo agent-os worker dashboard (Ink TUI)")
+    .option("--task <taskId>", "filter to one task")
+    .option("--interval <ms>", "poll interval ms", "1000")
+    .option("--no-alt-screen", "render without alternate screen")
+    .action(async (opts) => {
+      const { runWatchTui } = await import("../tui/index.js");
+      await runWatchTui({
+        taskId: opts.task,
+        intervalMs: Number(opts.interval) || 1000,
+        altScreen: opts.altScreen !== false,
+      });
+    });
+
 
   program.command("doctor").description("Check runtime health").action(async () => {
     printJson(await controller(program).doctor());
@@ -183,7 +211,16 @@ function addTasks(program: Command): void {
     printJson(await controller(program).taskDryRun(taskId, opts.provider ? asProvider(opts.provider) : undefined, opts.model));
   });
   task.command("run").description("Run provider in an isolated worker copy and capture diff/logs/usage").argument("[taskId]", "defaults to latest task").option("--provider <provider>", "provider id", "manual").option("--model <model>", "exact model id; for Gemini prefer gemini-2.5-flash-lite if default is capacity limited").action(async (taskId, opts) => {
-    printJson(await controller(program).taskRun(taskId, asProvider(opts.provider), opts.model, { onProgress: writeAgentOsProgress }));
+    try {
+      printJson(await controller(program).taskRun(taskId, asProvider(opts.provider), opts.model, { onProgress: writeAgentOsProgress }));
+    } catch (error) {
+      if (error instanceof MissingModelRouteError) {
+        console.error(`error: ${error.message}`);
+        console.error(`hint: agent-os models list --provider ${error.provider}`);
+        process.exit(2);
+      }
+      throw error;
+    }
   });
   task.command("diff").description("Print captured worker diff").argument("[taskId]", "defaults to latest task").action(async (taskId) => console.log(await controller(program).taskDiff(taskId)));
   task.command("validate").description("Run validators on captured worker output").argument("[taskId]", "defaults to latest task").action(async (taskId) => printJson(await controller(program).taskValidate(taskId)));

@@ -8,7 +8,8 @@ import { createWorkerId } from "../core/ids.js";
 import { buildRunUsage } from "../usage/usage.js";
 import { captureWorkspaceDiff } from "../workspace/diff.js";
 import { createTempCopy } from "../workspace/temp-copy.js";
-import { directCliErrorMessage } from "./direct-cli-output.js";
+import { contentText, directCliErrorMessage } from "./direct-cli-output.js";
+import { registerWorker, unregisterWorker, type TrackedWorker } from "../core/worker-cleanup.js";
 
 export interface ExternalProviderRun {
   worker: WorkerRecord;
@@ -112,6 +113,7 @@ export async function runExternalProvider(
     isolation: "temp_copy",
     startedAt,
     finishedAt,
+    pid: processResult.pid,
   };
 
   await writeFile(join(workerPath, "workspace.json"), `${JSON.stringify(worker, null, 2)}\n`, "utf8");
@@ -141,6 +143,7 @@ interface ProcessResult {
   exitCode: number;
   signal?: NodeJS.Signals | null;
   errorMessage?: string;
+  pid?: number;
 }
 
 function runProcess(
@@ -181,6 +184,23 @@ function runProcess(
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
+    // Track the live child so SIGINT/SIGTERM on the orchestrator can sweep it
+    // and prune its scratch workspace. The handler removes itself on `close`.
+    const tracked: TrackedWorker = { child, workspacePath };
+    registerWorker(tracked);
+    // Persist the spawned PID early so out-of-process dashboards (TUI watch) can sample CPU/RAM via `ps`.
+    if (child.pid) {
+      const pidRecord: WorkerRecord = {
+        taskId,
+        workerId,
+        provider,
+        workspacePath,
+        isolation: "temp_copy",
+        startedAt: new Date().toISOString(),
+        pid: child.pid,
+      };
+      enqueueWrite(() => writeFile(join(workerPath, "workspace.json"), `${JSON.stringify(pidRecord, null, 2)}\n`, "utf8"));
+    }
     let killTimer: NodeJS.Timeout | undefined;
     let idleTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
@@ -208,6 +228,7 @@ function runProcess(
       errorMessage = error.message;
     });
     child.on("close", async (code, signal) => {
+      unregisterWorker(tracked);
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       if (idleTimer) clearTimeout(idleTimer);
@@ -219,6 +240,7 @@ function runProcess(
         exitCode: timedOut || idleTimedOut || outputLimitHit ? 124 : code ?? (signal ? 124 : 1),
         signal,
         errorMessage,
+        pid: child.pid,
       });
     });
 
@@ -431,8 +453,3 @@ function finalAgentMessage(stdout: string): string {
   return finalText;
 }
 
-function contentText(content: string | Array<{ type?: string; text?: string }> | undefined): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.map((part) => part.type === "text" ? part.text ?? "" : "").filter(Boolean).join("\n");
-}

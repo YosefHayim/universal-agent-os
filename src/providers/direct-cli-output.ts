@@ -68,7 +68,12 @@ function jsonMessage(value: string): string {
   }
 }
 
-function contentText(content: string | Array<{ type?: string; text?: string }> | undefined): string {
+/**
+ * Flattens a Claude/Anthropic-style `content` field (string or text-part array)
+ * into a single newline-joined string. Exported so other provider runners can
+ * share one canonical decoder rather than each shipping a near-identical copy.
+ */
+export function contentText(content: string | Array<{ type?: string; text?: string }> | undefined): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.map((part) => part.type === "text" ? part.text ?? "" : "").filter(Boolean).join("\n");

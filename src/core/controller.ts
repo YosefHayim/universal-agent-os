@@ -15,6 +15,7 @@ import {
 } from "../config/config-loader.js";
 import type { ProviderAvailability, ProviderId, ProviderResult, RiskLevel, RuntimePaths, SourceKind, Task, TaskPlan, TaskState, ValidationResult } from "./types.js";
 import { appendEvent, readTaskEvents } from "./events.js";
+import { appendRegistryEntry } from "./global-registry.js";
 import { compileContext } from "../context/compiler.js";
 import { listModels, modelsDoctor, refreshModels } from "../models/index.js";
 import { runExternalProvider, type ExternalProviderProgress } from "../providers/external-runner.js";
@@ -236,6 +237,12 @@ export class Controller {
     await this.init();
     const task = await createTask(goal, { ...options, rootDir: this.paths.rootDir });
     await this.queue().enqueue(task.id, "created", "task created");
+    await appendRegistryEntry({
+      taskId: task.id,
+      repoRoot: this.paths.rootDir,
+      goal,
+      createdAt: task.createdAt,
+    });
     return { id: task.id, taskId: task.id, task };
   }
 
@@ -443,6 +450,14 @@ export class Controller {
         model: selectedModelId,
         modelCatalogSource: route.model?.source.kind,
         message: route.reason,
+      });
+      await appendRegistryEntry({
+        taskId: id,
+        repoRoot: this.paths.rootDir,
+        goal: task.goal,
+        createdAt: new Date().toISOString(),
+        provider: route.provider,
+        modelId: selectedModelId,
       });
       await appendTelemetrySpan(this.paths, {
         taskId: id,

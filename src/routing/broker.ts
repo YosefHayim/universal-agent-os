@@ -5,6 +5,15 @@ import { fallbackProviders } from "./fallback.js";
 import { providerAdapter } from "../providers/registry.js";
 import { scoreRoute } from "./scoring.js";
 
+export class MissingModelRouteError extends Error {
+  readonly provider: string;
+  constructor(provider: string) {
+    super(`provider '${provider}' did not resolve a concrete model — pass --model <id>`);
+    this.name = "MissingModelRouteError";
+    this.provider = provider;
+  }
+}
+
 export interface RouteChoice {
   provider: ProviderId;
   model?: ModelCatalogEntry;
@@ -58,6 +67,9 @@ async function chooseRuntimeRoute(paths: RuntimePaths, task: Task, models: Model
   }
   const best = scored.sort((a, b) => b.score - a.score)[0];
   if (!best || best.score < 0) return { provider: "manual", score: 0, reason: "no healthy provider; using manual fallback" };
+  if (!best.model && !best.modelId && best.provider !== "manual") {
+    throw new MissingModelRouteError(best.provider);
+  }
   return best;
 }
 

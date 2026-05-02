@@ -57,6 +57,7 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   cwd: string;
+  spawnedFromPath?: string;
 }
 
 export interface TaskState {
@@ -222,4 +223,6 @@ export interface WorkerRecord {
   isolation: "temp_copy" | "git_worktree";
   startedAt: string;
   finishedAt?: string;
+  /** OS PID of the spawned worker subprocess; persisted so out-of-process dashboards can sample CPU/RAM via `ps`. */
+  pid?: number;
 }

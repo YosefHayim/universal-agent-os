@@ -1,0 +1,65 @@
+# Cross-platform CI matrix for universal-agent-os.
+#
+# Why a matrix (and not Docker) for this repo:
+#   - This is a TS/Node CLI + TUI tool. Containers add no isolation value
+#     for developer machines and hide real OS differences (path separators,
+#     shells, spawn semantics) that the matrix surfaces directly.
+#   - GitHub-hosted runners provide native ubuntu/macos/windows in parallel,
+#     which mirrors the surface end users run agent-os on.
+#
+# Security note: this workflow only consumes trusted contexts (matrix values
+# and repo-controlled scripts). No issue/PR/commit text is interpolated into
+# shell commands, so command-injection vectors do not apply here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['20.x', '22.x']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      # Tests rely on POSIX-only paths (hardcoded "/tmp/..." in fixtures) and
+      # spawn shell:true in src/core/notifications.ts. On Windows we still run
+      # them so regressions surface, but allow failure until POSIX-isms are
+      # refactored (tracked as a separate task — see audit table in PR notes).
+      - name: Tests
+        run: pnpm test
+        continue-on-error: ${{ matrix.os == 'windows-latest' }}
+
+      # The build script uses `rm -rf` and `chmod +x`, both unavailable in
+      # the default Windows shell. Allow failure on Windows only; ubuntu and
+      # macos gate the merge.
+      - name: Build
+        run: pnpm run build
+        continue-on-error: ${{ matrix.os == 'windows-latest' }}
