@@ -1,7 +1,9 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { readRegistryEntries, type RegistryEntry } from "../../core/global-registry.js";
-import { getAnthropicRateLimitSnapshot } from "./anthropic-rate-limits.js";
+import { detectProviderSubscription, type ProviderSubscription } from "./plan-detectors/index.js";
+
+export type { ProviderSubscription };
 
 // === PROVIDER STATE DISCOVERY ===
 /**
@@ -118,15 +120,6 @@ export type ProviderUsageStat = {
 };
 
 /**
- * Normalized per-provider subscription/auth status discovered from local CLI state files.
- */
-export type ProviderSubscription = {
-  plan?: string;
-  active: boolean;
-  source: string;
-};
-
-/**
  * One provider row with windows as columns for dashboard rendering.
  */
 export type ProviderRow = {
@@ -205,165 +198,6 @@ export async function computeProviderUsage(opts?: { now?: Date }): Promise<Provi
 }
 
 /**
- * Reads and parses a JSON file safely; returns undefined for missing/unreadable/invalid files.
- */
-async function readJsonSafe(path: string): Promise<Record<string, unknown> | undefined> {
-  const text = await readTextSafe(path);
-  if (!text) return undefined;
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>;
-  } catch {
-    return undefined;
-  }
-  return undefined;
-}
-
-/**
- * Reads text safely with optional byte cap; returns undefined on read errors.
- */
-async function readTextSafe(path: string, maxBytes = 128 * 1024): Promise<string | undefined> {
-  try {
-    const raw = await readFile(path, "utf8");
-    return raw.length > maxBytes ? raw.slice(0, maxBytes) : raw;
-  } catch {
-    return undefined;
-  }
-}
-
-function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
-  const parts = token.split(".");
-  if (parts.length < 2) return undefined;
-  try {
-    const payload = Buffer.from(parts[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-    const parsed = JSON.parse(payload) as unknown;
-    return typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function getString(obj: Record<string, unknown>, key: string): string | undefined {
-  const value = obj[key];
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
-}
-
-function normalizePlan(plan: string | undefined): string {
-  if (!plan) return "unknown";
-  const lower = plan.toLowerCase();
-  if (lower.includes("free")) return "Free";
-  if (lower.includes("plus")) return "Plus";
-  if (lower.includes("pro")) return "Pro";
-  if (lower.includes("max")) return "Max";
-  if (lower.includes("team")) return "Team";
-  return plan;
-}
-
-async function readDirHasEntry(dir: string): Promise<boolean> {
-  try {
-    const entries = await readdir(dir);
-    return entries.length > 0;
-  } catch {
-    return false;
-  }
-}
-
-async function discoverProviderSubscription(provider: string): Promise<ProviderSubscription> {
-  const home = process.env.HOME ?? "";
-
-  if (provider === "codex") {
-    const authPath = join(home, ".codex", "auth.json");
-    const auth = await readJsonSafe(authPath);
-    if (!auth) return { active: false, plan: "unknown", source: authPath };
-    const tokens = auth.tokens;
-    const tokenObj = typeof tokens === "object" && tokens !== null ? tokens as Record<string, unknown> : undefined;
-    const accessToken = tokenObj ? getString(tokenObj, "access_token") : undefined;
-    const idToken = tokenObj ? getString(tokenObj, "id_token") : undefined;
-    const payload = accessToken ? decodeJwtPayload(accessToken) : idToken ? decodeJwtPayload(idToken) : undefined;
-    const authClaims = payload && typeof payload["https://api.openai.com/auth"] === "object" && payload["https://api.openai.com/auth"] !== null
-      ? payload["https://api.openai.com/auth"] as Record<string, unknown>
-      : undefined;
-    const plan = normalizePlan(authClaims ? getString(authClaims, "chatgpt_plan_type") : undefined);
-    return { active: Boolean(accessToken || idToken), plan, source: authPath };
-  }
-
-  if (provider === "claude") {
-    const settingsPath = join(home, ".claude", "settings.json");
-    const credentialsPath = join(home, ".claude", ".credentials.json");
-    const projectsDir = join(home, ".claude", "projects");
-    const [settings, credentials, projectsActive] = await Promise.all([
-      readJsonSafe(settingsPath),
-      readJsonSafe(credentialsPath),
-      readDirHasEntry(projectsDir),
-    ]);
-    const env = settings && typeof settings.env === "object" && settings.env !== null
-      ? settings.env as Record<string, unknown>
-      : undefined;
-    const hasEnvToken = Boolean(env && (getString(env, "ANTHROPIC_AUTH_TOKEN") || getString(env, "ANTHROPIC_API_KEY")));
-    const hasOauth = Boolean(credentials && Object.keys(credentials).length > 0);
-    const active = hasEnvToken || hasOauth || projectsActive;
-    const source = hasOauth ? credentialsPath : projectsActive ? projectsDir : settingsPath;
-    // Prefer plan tier inferred from live Anthropic rate-limit headers when any
-    // API response has been observed in this process. If no call has been made
-    // yet, signal "Pending first request" rather than the static "unknown".
-    const snapshot = getAnthropicRateLimitSnapshot();
-    const plan = snapshot ? snapshot.planTier : active ? "Pending" : "unknown";
-    return { active, plan, source };
-  }
-
-  if (provider === "gemini") {
-    const oauthPath = join(home, ".gemini", "oauth_creds.json");
-    const oauth = await readJsonSafe(oauthPath);
-    const accessToken = oauth ? getString(oauth, "access_token") : undefined;
-    return { active: Boolean(accessToken), plan: "Free", source: oauthPath };
-  }
-
-  if (provider === "zai") {
-    const zaiPath = join(home, ".zai", "config.json");
-    const glmPath = join(home, ".glm", "config.json");
-    const zai = await readJsonSafe(zaiPath);
-    const glm = await readJsonSafe(glmPath);
-    const source = zai ? zaiPath : glm ? glmPath : `${zaiPath}|${glmPath}`;
-    return { active: Boolean(zai || glm), plan: "unknown", source };
-  }
-
-  if (provider === "opencode") {
-    const path = join(home, ".opencode", "config.json");
-    const json = await readJsonSafe(path);
-    const auth = json ? getString(json, "token") ?? getString(json, "apiKey") : undefined;
-    return { active: Boolean(auth), plan: "unknown", source: path };
-  }
-
-  if (provider === "kilo") {
-    const path = join(home, ".kilo", "config.json");
-    const json = await readJsonSafe(path);
-    const auth = json ? getString(json, "token") ?? getString(json, "apiKey") : undefined;
-    return { active: Boolean(auth), plan: "unknown", source: path };
-  }
-
-  if (provider === "cline") {
-    const path = join(home, ".cline", "data", "settings", "providers.json");
-    const providers = await readJsonSafe(path);
-    const rootProviders = providers && typeof providers.providers === "object" && providers.providers !== null
-      ? providers.providers as Record<string, unknown>
-      : undefined;
-    const clineProvider = rootProviders && typeof rootProviders.cline === "object" && rootProviders.cline !== null
-      ? rootProviders.cline as Record<string, unknown>
-      : undefined;
-    const settings = clineProvider && typeof clineProvider.settings === "object" && clineProvider.settings !== null
-      ? clineProvider.settings as Record<string, unknown>
-      : undefined;
-    const auth = settings && typeof settings.auth === "object" && settings.auth !== null
-      ? settings.auth as Record<string, unknown>
-      : undefined;
-    const active = Boolean(auth && (getString(auth, "accessToken") || getString(auth, "refreshToken")));
-    return { active, plan: "Free", source: path };
-  }
-
-  return { active: false, plan: "unknown", source: "cli-help" };
-}
-
-/**
  * Builds one row per provider with subscription state plus per-window usage/cap details.
  */
 export async function buildProviderRows(opts?: { now?: Date }): Promise<ProviderRow[]> {
@@ -377,7 +211,7 @@ export async function buildProviderRows(opts?: { now?: Date }): Promise<Provider
 
   const rows: ProviderRow[] = [];
   for (const limit of PROVIDER_LIMITS) {
-    const subscription = await discoverProviderSubscription(limit.provider);
+    const subscription = await detectProviderSubscription(limit.provider);
     const providerStats = statsByProvider.get(limit.provider) ?? [];
     const windows: ProviderRow["windows"] = {};
     for (const row of providerStats) {
@@ -388,7 +222,7 @@ export async function buildProviderRows(opts?: { now?: Date }): Promise<Provider
         percent: row.tokenCap && row.tokenCap > 0 ? Math.max(0, Math.min(100, (row.tokensUsed / row.tokenCap) * 100)) : undefined,
       };
     }
-    rows.push({ provider: limit.provider, subscription: { ...subscription, plan: subscription.plan ?? "unknown" }, windows });
+    rows.push({ provider: limit.provider, subscription, windows });
   }
   return rows;
 }

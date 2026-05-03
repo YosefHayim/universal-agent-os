@@ -3,6 +3,7 @@ import { Box, Text, useApp, useFocus, useInput, useStdout } from "ink";
 import chalk from "chalk";
 import { buildSnapshot, watchSnapshots, type AggregateSnapshot, type GlobalWorker } from "./runtime/aggregator.js";
 import { buildProviderRows, type ProviderRow } from "./runtime/provider-limits.js";
+import { getActivityEntries, pollWorkerLogs, recordStatusEvent, type ActivityEntry } from "./runtime/activity-stream.js";
 import UsageLimitsPanel from "./components/UsageLimitsPanel.js";
 
 const colors = {
@@ -24,12 +25,6 @@ const blocks = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 const h = React.createElement;
 
 import type { WatchDashboardProps } from "./watch-props.js";
-
-type LogLine = {
-  id: number;
-  text: string;
-  color: string;
-};
 
 type Kpi = {
   label: string;
@@ -381,13 +376,37 @@ const WorkerDetails = ({ worker, spinnerIndex }: { worker: UiWorker | undefined;
   );
 };
 
-const ActivityLog = ({ logs }: { logs: LogLine[] }) => h(
-  Box,
-  { borderStyle: "double", borderColor: colors.border, flexDirection: "column", paddingX: 1, flexGrow: 1 },
-  h(Text, { color: colors.orange, bold: true }, "REAL-TIME ACTIVITY LOG"),
-  h(Text, { color: colors.dim }, "..."),
-  ...logs.slice(0, 14).map((line) => h(Text, { key: line.id, color: line.color }, line.text)),
-);
+const ACTIVITY_WINDOW = 14;
+
+const activityKindColor: Record<ActivityEntry["kind"], string> = {
+  stdout: colors.dim,
+  stderr: colors.red,
+  tool: colors.cyan,
+  edit: colors.yellow,
+  status: colors.white,
+};
+
+const ActivityLog = ({ entries, scrollOffset, focused, columns }: { entries: ActivityEntry[]; scrollOffset: number; focused: boolean; columns: number }) => {
+  const lineWidth = Math.max(20, columns - 6);
+  const visible = entries.slice(scrollOffset, scrollOffset + ACTIVITY_WINDOW);
+  const overflow = entries.length > ACTIVITY_WINDOW;
+  const lastVisible = Math.min(entries.length, scrollOffset + visible.length);
+  const titleColor = focused ? colors.cyan : colors.orange;
+  return h(
+    Box,
+    { borderStyle: "double", borderColor: focused ? colors.cyan : colors.border, flexDirection: "column", paddingX: 1, flexGrow: 1 },
+    h(Text, { color: titleColor, bold: true }, `REAL-TIME ACTIVITY LOG${focused ? "  (focused)" : ""}`),
+    h(Text, { color: colors.dim }, focused ? "↑↓ PgUp/PgDn g/G  •  Tab to switch panel" : "Tab to focus and scroll"),
+    ...visible.map((entry) => {
+      const stamp = entry.timestamp.slice(11, 19);
+      const text = fit(`${stamp} [${entry.shortId}] ${entry.line}`, lineWidth);
+      return h(Text, { key: entry.id, color: activityKindColor[entry.kind] ?? colors.white }, text);
+    }),
+    overflow
+      ? h(Text, { color: colors.dim }, `[ ${scrollOffset + 1}–${lastVisible} of ${entries.length}  •  ↑↓ PgUp/PgDn g/G ]`)
+      : null,
+  );
+};
 
 const TokenPanel = ({ tokensIn, tokensOut, windowLabel, windowMs, snapshot }: { tokensIn: number[]; tokensOut: number[]; windowLabel: string; windowMs: number; snapshot: AggregateSnapshot }) => {
   const inRate = tokensIn.at(-1) ?? 0;
@@ -414,16 +433,21 @@ const TokenPanel = ({ tokensIn, tokensOut, windowLabel, windowMs, snapshot }: { 
 };
 
 const ModelPanel = ({ byModel }: { byModel: Record<string, number> }) => {
-  const entries = Object.entries(byModel).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  const entries = Object.entries(byModel).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const total = entries.reduce((sum, [, count]) => sum + count, 0);
-  const palette = [colors.cyan, colors.blue, colors.magenta];
+  const palette = [colors.cyan, colors.blue, colors.magenta, colors.green, colors.yellow];
   return h(
     Box,
     { borderStyle: "single", borderColor: colors.border, flexDirection: "column", paddingX: 1, height: 8 },
     h(Text, { color: colors.orange, bold: true }, "MODEL USAGE"),
-    h(Text, { color: colors.cyan }, "   ◜██◝"),
-    h(Text, { color: colors.magenta }, "   ◟██◞"),
-    ...entries.map(([model, count], index) => h(Text, { key: model }, h(Text, { color: palette[index] }, "■"), ` ${fit(model, 18)} ${percent(count, total)}% (${count})`)),
+    total === 0
+      ? h(Text, { color: colors.dim }, "(no model usage yet)")
+      : null,
+    ...entries.map(([model, count], index) => {
+      const pct = percent(count, total);
+      const filled = clamp(Math.round(pct / 10), 0, 10);
+      return h(Text, { key: model }, h(Text, { color: palette[index % palette.length] }, `${"█".repeat(filled)}${"░".repeat(10 - filled)}`), ` ${fit(model, 18)} ${pct}% (${count})`);
+    }),
   );
 };
 
@@ -453,7 +477,7 @@ const RightColumn = ({ snapshot, tokensIn, tokensOut, providerRows, tokenWindowL
 );
 
 const Footer = ({ columns, paused }: { columns: number; paused: boolean }) => {
-  const text = `q Quit  ←/→ Worker  [/] Window  r Refresh  s Sort  p ${paused ? "Resume" : "Pause"}  ? Help    Auto-refresh: ${paused ? "PAUSED" : "ON"}`;
+  const text = `q Quit  ←/→ Worker  Tab Focus  [/] Window  r Refresh  s Sort  p ${paused ? "Resume" : "Pause"}  ? Help    Auto-refresh: ${paused ? "PAUSED" : "ON"}`;
   return h(Box, { height: 1 }, h(Text, { color: colors.dim }, text.padStart(columns)));
 };
 
@@ -463,26 +487,23 @@ const EmptyState = () => h(
   h(Text, { color: colors.dim }, "No active agent-os workers found in any registered repo. Run agent-os task run somewhere to see live activity."),
 );
 
-const logChanges = (previous: Map<string, GlobalWorker>, workers: GlobalWorker[]): LogLine[] => {
-  const stamp = formatTime(new Date());
-  const lines: LogLine[] = [];
+/** Detect spawn/status transitions and push them to the shared activity-stream buffer. */
+const recordStatusChanges = (previous: Map<string, GlobalWorker>, workers: GlobalWorker[]): void => {
   for (const worker of workers) {
     const previousWorker = previous.get(workerKey(worker));
     if (!previousWorker) {
-      lines.push({ id: Date.now() + lines.length, color: colors.cyan, text: `${stamp} [W-${shortWorkerId(worker)}] spawned ${basename(fileFrom(worker))} (${modelFrom(worker)})` });
+      recordStatusEvent(worker.workerId, `spawned ${basename(fileFrom(worker))} (${modelFrom(worker)})`);
       continue;
     }
     if (previousWorker.status !== worker.status) {
       const action = worker.status === "completed" ? "completed" : `${previousWorker.status}->${worker.status}`;
-      const color = worker.status === "failed" || worker.status === "cancelled" ? colors.red : worker.status === "completed" ? colors.green : colors.yellow;
-      lines.push({ id: Date.now() + lines.length, color, text: `${stamp} [W-${shortWorkerId(worker)}] ${action} ${basename(fileFrom(worker))} (${modelFrom(worker)})` });
+      recordStatusEvent(worker.workerId, `${action} ${basename(fileFrom(worker))} (${modelFrom(worker)})`);
     }
   }
-  return lines;
 };
 
 /** Renders the live agent-os global worker dashboard from aggregator snapshots. */
-export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashboardProps) {
+export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashboardProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { isFocused } = useFocus({ autoFocus: true });
@@ -502,7 +523,9 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
   const [load, setLoad] = useState<number[]>(() => Array.from({ length: 60 }, () => 0));
   const [tokensIn, setTokensIn] = useState<number[]>(() => Array.from({ length: 60 }, () => 0));
   const [tokensOut, setTokensOut] = useState<number[]>(() => Array.from({ length: 60 }, () => 0));
-  const [logs, setLogs] = useState<LogLine[]>([]);
+  const [activityEntries, setActivityEntries] = useState<ActivityEntry[]>([]);
+  const [activityScrollOffset, setActivityScrollOffset] = useState(0);
+  const [activityFocused, setActivityFocused] = useState(false);
   const previousWorkers = useRef<Map<string, GlobalWorker>>(new Map());
   const previousTotals = useRef({ tokensIn: 0, tokensOut: 0 });
   const hasUserSelection = useRef(false);
@@ -556,10 +579,30 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
     setTokensOut((values) => [...values.slice(1), Math.max(0, visibleSnapshot.totals.tokensOut - previousTotals.current.tokensOut)]);
     previousTotals.current = { tokensIn: visibleSnapshot.totals.tokensIn, tokensOut: visibleSnapshot.totals.tokensOut };
     const isFirst = previousWorkers.current.size === 0;
-    const changes = isFirst ? [] : logChanges(previousWorkers.current, visibleSnapshot.workers);
+    if (!isFirst) recordStatusChanges(previousWorkers.current, visibleSnapshot.workers);
     previousWorkers.current = new Map(visibleSnapshot.workers.map((worker) => [workerKey(worker), worker]));
-    if (changes.length) setLogs((items) => [...changes, ...items].slice(0, 200));
   }, [visibleSnapshot]);
+
+  // Tail running workers' stdout/stderr at ~1Hz and refresh the activity buffer.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const running = visibleSnapshot.workers
+        .filter((worker) => worker.status === "running" && worker.workerDir)
+        .map((worker) => ({ workerId: worker.workerId, dir: worker.workerDir as string }));
+      try { await pollWorkerLogs(running); } catch { /* swallow — tail is best-effort */ }
+      if (!cancelled) setActivityEntries(getActivityEntries());
+    };
+    void tick();
+    const timer = setInterval(() => { void tick(); }, 1000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [visibleSnapshot]);
+
+  // Keep the activity scroll offset in range as the buffer grows/shrinks.
+  useEffect(() => {
+    const maxOffset = Math.max(0, activityEntries.length - ACTIVITY_WINDOW);
+    setActivityScrollOffset((value) => Math.max(0, Math.min(maxOffset, value)));
+  }, [activityEntries.length]);
 
   useEffect(() => {
     const maxOffset = Math.max(0, workers.length - WINDOW_SIZE);
@@ -588,30 +631,38 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
       exit();
       return;
     }
-    const maxOffset = Math.max(0, workers.length - WINDOW_SIZE);
+    if (key.tab) {
+      setActivityFocused((value) => !value);
+      return;
+    }
+    const tableMaxOffset = Math.max(0, workers.length - WINDOW_SIZE);
+    const activityMaxOffset = Math.max(0, activityEntries.length - ACTIVITY_WINDOW);
+    const setOffset = activityFocused ? setActivityScrollOffset : setScrollOffset;
+    const window = activityFocused ? ACTIVITY_WINDOW : WINDOW_SIZE;
+    const maxOffset = activityFocused ? activityMaxOffset : tableMaxOffset;
     const clampOffset = (next: number) => Math.max(0, Math.min(maxOffset, next));
     if (key.upArrow) {
-      setScrollOffset((value) => clampOffset(value - 1));
+      setOffset((value) => clampOffset(value - 1));
       return;
     }
     if (key.downArrow) {
-      setScrollOffset((value) => clampOffset(value + 1));
+      setOffset((value) => clampOffset(value + 1));
       return;
     }
     if (key.pageUp) {
-      setScrollOffset((value) => clampOffset(value - WINDOW_SIZE));
+      setOffset((value) => clampOffset(value - window));
       return;
     }
     if (key.pageDown) {
-      setScrollOffset((value) => clampOffset(value + WINDOW_SIZE));
+      setOffset((value) => clampOffset(value + window));
       return;
     }
     if (input === "g") {
-      setScrollOffset(0);
+      setOffset(0);
       return;
     }
     if (input === "G") {
-      setScrollOffset(maxOffset);
+      setOffset(maxOffset);
       return;
     }
     if (input === "l" || key.rightArrow) {
@@ -681,7 +732,7 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
       Box,
       { height: bottomHeight, borderColor: focusedBorder },
       h(WorkerDetails, { worker: selectedWorker, spinnerIndex }),
-      h(ActivityLog, { logs }),
+      h(ActivityLog, { entries: activityEntries, scrollOffset: activityScrollOffset, focused: activityFocused, columns: Math.floor(size.columns * 0.45) }),
       h(RightColumn, { snapshot: visibleSnapshot, tokensIn, tokensOut, providerRows, tokenWindowLabel: TOKEN_WINDOWS[tokenWindowIdx]!.label, tokenWindowMs: TOKEN_WINDOWS[tokenWindowIdx]!.ms }),
     ),
     h(Footer, { columns: size.columns, paused }),

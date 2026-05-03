@@ -3,6 +3,21 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { matchesAnyGlob } from "../validators/scope-check.js";
 
+/**
+ * Strip GIT_* env vars before spawning git in a foreign repo. When this code
+ * runs from inside a git hook (e.g. husky pre-commit) the parent's
+ * GIT_INDEX_FILE/GIT_DIR/GIT_WORK_TREE leak into children and silently
+ * pin them to the wrong index, producing empty diffs.
+ */
+function gitChildEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("GIT_")) continue;
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 export async function fileExists(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -64,7 +79,7 @@ export async function captureWorkspaceDiff(input: {
   isolation: "temp_copy" | "git_worktree";
 }): Promise<{ patch: string; changedFiles: string[] }> {
   if (input.isolation === "git_worktree") {
-    const result = spawnSync("git", ["diff", "--", ...input.allowedFiles], { cwd: input.workspacePath, encoding: "utf8" });
+    const result = spawnSync("git", ["diff", "--", ...input.allowedFiles], { cwd: input.workspacePath, encoding: "utf8", env: gitChildEnv() });
     const patch = result.stdout;
     return { patch, changedFiles: changedFilesFromPatch(patch).filter((file) => matchesAnyGlob(file, input.allowedFiles)) };
   }

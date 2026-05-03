@@ -1,0 +1,96 @@
+name: Publish Package
+
+# Publishes universal-agent-os to npm using NPM_TOKEN.
+# Adapted from the ebay-mcp publish workflow (which used OIDC trusted publishing).
+# This repo uses a classic NPM_TOKEN secret instead - set it under
+# Settings > Secrets and variables > Actions > NPM_TOKEN.
+#
+# Triggers:
+#   - push of a v*.*.* tag
+#   - workflow_run after Release completes (GITHUB_TOKEN-pushed tags do not
+#     fire `push:tags` in downstream workflows; this is the bridge)
+#   - workflow_dispatch (manual recovery, e.g. publish an existing tag)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_run:
+    workflows: ['Release']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish (e.g. v1.8.8). Defaults to main HEAD.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      INPUT_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Resolve checkout ref
+        id: ref
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            workflow_dispatch)
+              if [ -n "$INPUT_TAG" ]; then
+                echo "ref=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+              else
+                echo "ref=main" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            workflow_run)
+              echo "ref=main" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ref=$GITHUB_REF" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Run tests
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --no-git-checks --access public

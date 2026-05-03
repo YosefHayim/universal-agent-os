@@ -29,14 +29,15 @@ export async function loadNotificationConfig(paths: {
     const content = await fs.readFile(configPath, 'utf-8')
     const parsed = JSON.parse(content)
     return { ...DEFAULT_NOTIFICATION_CONFIG, ...parsed }
-  } catch (error: any) {
-    if (error.code === 'ENOENT') {
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException
+    if (err.code === 'ENOENT') {
       // File not found, return defaults
       return DEFAULT_NOTIFICATION_CONFIG
     }
     // Log parsing errors but return defaults
     console.error(
-      `[Agent OS] Warning: Invalid notifications.json at ${configPath}. Using defaults. Error: ${error.message}`,
+      `[Agent OS] Warning: Invalid notifications.json at ${configPath}. Using defaults. Error: ${err.message}`,
     )
     return DEFAULT_NOTIFICATION_CONFIG
   }
@@ -76,9 +77,10 @@ export async function notifyWorkerFinished(
       const payload = { ...event, finishedAt: new Date().toISOString() }
       await fs.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8')
       wroteWakeFile = filePath
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
       console.error(
-        `[Agent OS] Error writing wakeup file for task ${event.taskId}, worker ${event.workerId}: ${error.message}`,
+        `[Agent OS] Error writing wakeup file for task ${event.taskId}, worker ${event.workerId}: ${message}`,
       )
     }
   }
@@ -107,9 +109,10 @@ export async function notifyWorkerFinished(
       })
       child.unref()
       ranCommands++
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
       console.error(
-        `[Agent OS] Error spawning notification command "${command}" for task ${event.taskId}: ${error.message}`,
+        `[Agent OS] Error spawning notification command "${command}" for task ${event.taskId}: ${message}`,
       )
     }
   }

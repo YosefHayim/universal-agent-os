@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import * as fs from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { mock, test } from "node:test";
+import { test } from "node:test";
 import { buildSnapshot } from "../src/tui/runtime/aggregator.js";
 import type { RegistryEntry } from "../src/core/global-registry.js";
 
@@ -19,7 +18,6 @@ async function withGlobalFixture<T>(fn: (fixture: { dir: string; repoA: string; 
     await mkdir(repoB, { recursive: true });
     return await fn({ dir, repoA, repoB, registryPath });
   } finally {
-    mock.restoreAll();
     if (previous === undefined) delete process.env.AGENT_OS_REGISTRY_FILE;
     else process.env.AGENT_OS_REGISTRY_FILE = previous;
     await rm(dir, { recursive: true, force: true });
@@ -130,20 +128,34 @@ test("buildSnapshot sinceMs and includeRoots filters registry candidates", async
 
 test("buildSnapshot reuses cached JSON when mtimes are unchanged", async () => {
   await withGlobalFixture(async ({ repoA, registryPath }) => {
-    await writeTask(repoA, "task-a", "worker-a", { goal: "A", createdAt: "2026-05-02T00:00:00.000Z", status: "running" });
+    await writeTask(repoA, "task-a", "worker-a", { goal: "A", createdAt: "2026-05-02T00:00:00.000Z", status: "running", checkedAt: "2026-05-02T00:03:00.000Z" });
     await writeFile(registryPath, `${registryLine("task-a", repoA, "A", "2026-05-02T00:00:00.000Z")}\n`, "utf8");
     const heartbeatPath = path.join(repoA, ".agent-os", "tasks", "task-a", "workers", "worker-a", "heartbeat.json");
-    let heartbeatReads = 0;
-    const originalReadFile = fs.readFile;
-    mock.method(fs, "readFile", async (...args: Parameters<typeof fs.readFile>): Promise<Awaited<ReturnType<typeof fs.readFile>>> => {
-      if (String(args[0]) === heartbeatPath) heartbeatReads += 1;
-      return originalReadFile(...args);
-    });
 
-    await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
-    await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
+    const first = await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
+    assert.equal(first.workers[0]?.outputBytes, 25);
 
-    assert.equal(heartbeatReads, 1);
+    // Overwrite heartbeat with new content but preserve mtime. If the JSON
+    // cache honors mtime equality the second snapshot should still report
+    // the originally cached outputBytes (25) rather than the new value (999).
+    const originalStat = await stat(heartbeatPath);
+    await writeFile(heartbeatPath, JSON.stringify({
+      taskId: "task-a",
+      workerId: "worker-a",
+      status: "running",
+      checkedAt: "2026-05-02T00:03:00.000Z",
+      lastOutputAt: "2026-05-02T00:03:00.000Z",
+      outputBytes: 999,
+    }), "utf8");
+    // Restore original mtime; use seconds to match the FS resolution stat reports.
+    const atimeSec = originalStat.atimeMs / 1000;
+    const mtimeSec = originalStat.mtimeMs / 1000;
+    await utimes(heartbeatPath, atimeSec, mtimeSec);
+    const restored = await stat(heartbeatPath);
+    assert.equal(restored.mtimeMs, originalStat.mtimeMs, "mtime restoration failed; cannot validate caching");
+
+    const second = await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
+    assert.equal(second.workers[0]?.outputBytes, 25);
   });
 });
 

@@ -1,5 +1,5 @@
 import { DIRECT_LAUNCH_PROVIDERS } from "../config/defaults.js";
-import type { CostCategory, ModelCatalogEntry, ProviderAvailability, ProviderId, RiskLevel, RuntimePaths, Task } from "../core/types.js";
+import type { ModelCatalogEntry, ProviderAvailability, ProviderId, RiskLevel, RuntimePaths, Task } from "../core/types.js";
 import { getManualProviderAvailability } from "./manual-status.js";
 import { fallbackProviders } from "./fallback.js";
 import { providerAdapter } from "../providers/registry.js";

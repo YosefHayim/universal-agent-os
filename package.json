@@ -15,7 +15,8 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/src/bin/agent-os.js",
     "cli": "tsx src/bin/agent-os.ts",
     "doctor": "tsx src/bin/agent-os.ts doctor",
-    "prepare": "pnpm run build",
+    "lint": "eslint src tests scripts",
+    "prepare": "husky || true",
     "prepack": "pnpm run build",
     "test": "tsx --test tests/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -27,11 +28,17 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/react": "^19.2.14",
+    "@typescript-eslint/eslint-plugin": "^8.59.1",
+    "@typescript-eslint/parser": "^8.59.1",
     "chalk": "^5.6.2",
+    "eslint": "^10.3.0",
+    "husky": "^9.1.7",
     "ink": "^5.2.1",
+    "lint-staged": "^16.4.0",
     "react": "^18.3.1",
     "tsx": "^4.21.0",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "typescript-eslint": "^8.59.1"
   },
   "packageManager": "pnpm@10.33.2"
 }

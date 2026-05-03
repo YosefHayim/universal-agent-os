@@ -8,7 +8,7 @@ import { notifyWorkerFinished } from '../src/core/notifications.js'
 // Mock process.stderr.isTTY for bell notification
 const originalIsTTY = process.stderr.isTTY
 let stderrOutput = ''
-let originalStderrWrite = process.stderr.write
+const originalStderrWrite = process.stderr.write
 
 afterEach(() => {
   process.stderr.isTTY = originalIsTTY
@@ -154,8 +154,9 @@ test('notifyWorkerFinished is a no-op when all options are off', async () => {
     try {
       await readFile(join(rootDir, '.agent-os', 'wakeups'))
       wakeupsDirExists = true
-    } catch (error: any) {
-      assert.equal(error.code, 'ENOENT', 'wakeups directory should not exist')
+    } catch (error: unknown) {
+      const err = error as NodeJS.ErrnoException
+      assert.equal(err.code, 'ENOENT', 'wakeups directory should not exist')
     }
     assert.equal(wakeupsDirExists, false, 'wakeups directory should not exist')
   } finally {

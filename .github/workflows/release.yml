@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       !contains(github.event.pull_request.labels.*.name, 'no-release'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check if release needed
+        id: skip_check
+        run: |
+          if git describe --exact-match HEAD >/dev/null 2>&1; then
+            echo "HEAD is already tagged - skipping release"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get release description
+        if: steps.skip_check.outputs.skip != 'true'
+        id: desc
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "title=Manual release" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine version bump
+        if: steps.skip_check.outputs.skip != 'true'
+        id: bump
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name || '') }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "type=patch" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q '"major"'; then
+            echo "type=major" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q '"minor"'; then
+            echo "type=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version in package.json
+        if: steps.skip_check.outputs.skip != 'true'
+        id: version
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          CURRENT_TAG="v${CURRENT}"
+
+          if git rev-parse "${CURRENT_TAG}" >/dev/null 2>&1; then
+            echo "v${CURRENT} already tagged - bumping ${{ steps.bump.outputs.type }}"
+            npm version ${{ steps.bump.outputs.type }} --no-git-tag-version
+          else
+            echo "v${CURRENT} not tagged yet - using as-is"
+          fi
+
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Release tag will be ${TAG}"
+
+      - name: Type check
+        if: steps.skip_check.outputs.skip != 'true'
+        run: pnpm run typecheck
+
+      - name: Lint
+        if: steps.skip_check.outputs.skip != 'true'
+        run: pnpm run lint
+
+      - name: Run tests
+        if: steps.skip_check.outputs.skip != 'true'
+        run: pnpm run test
+
+      - name: Build
+        if: steps.skip_check.outputs.skip != 'true'
+        run: pnpm run build
+
+      - name: Build release notes from commits
+        if: steps.skip_check.outputs.skip != 'true'
+        id: notes
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges -20)
+          fi
+          {
+            echo "body<<RELEASE_EOF"
+            echo "## What Changed"
+            echo ""
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "**PR:** [#${PR_NUMBER} - ${PR_TITLE}](${PR_URL})"
+            else
+              echo "**Manual release triggered via workflow_dispatch**"
+            fi
+            echo "**Bump:** \`${BUMP_TYPE}\`"
+            echo ""
+            echo "### Commits"
+            echo ""
+            echo "$COMMITS"
+            echo ""
+            echo "RELEASE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump and create tag
+        if: steps.skip_check.outputs.skip != 'true'
+        run: |
+          if ! git diff --quiet package.json 2>/dev/null || ! git diff --quiet pnpm-lock.yaml 2>/dev/null; then
+            git add package.json pnpm-lock.yaml 2>/dev/null || git add package.json
+            git commit -m "chore(release): ${{ steps.version.outputs.tag }}"
+          fi
+
+          git tag -a "${{ steps.version.outputs.tag }}" \
+            -m "Release ${{ steps.version.outputs.tag }} - ${{ steps.desc.outputs.title }}"
+          git push origin main --follow-tags
+
+      # npm publish is handled by .github/workflows/publish.yml (triggered via
+      # workflow_run after this Release completes).
+
+      - name: Create GitHub Release
+        if: steps.skip_check.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }} - ${{ steps.desc.outputs.title }}
+          body: ${{ steps.notes.outputs.body }}

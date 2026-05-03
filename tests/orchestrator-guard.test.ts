@@ -78,7 +78,7 @@ test("writeGuardState round-trips through readGuardState", async () => {
   });
 
 test("writeGuardState round-trips three sequential writes", async () => {
-  await withTempGuardFile("sequential.json", async (path) => {
+  await withTempGuardFile("sequential.json", async (_path) => {
     await writeGuardState(true);
     const state1 = await readGuardState();
     assert.equal(state1.enabled, true);

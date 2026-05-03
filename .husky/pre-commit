@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# Full quality gate. Runs typecheck, lint (no warnings), tests, and build
+# before every commit. If this is too slow, switch to lint-staged for
+# typecheck/lint of staged files plus a pre-push hook for the heavy gate.
+pnpm typecheck && \
+pnpm lint && \
+pnpm test && \
+pnpm build

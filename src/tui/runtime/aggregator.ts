@@ -36,6 +36,8 @@ export interface GlobalWorker {
   pid?: number;
   cpuPercent?: number;
   rssMb?: number;
+  /** Absolute path to the worker directory holding stdout.log/stderr.log; used by the activity-log tail. */
+  workerDir?: string;
 }
 
 /** Aggregates are precomputed so UI polling stays cheap and deterministic. */
@@ -192,6 +194,7 @@ async function workersForEntry(entry: RegistryEntry, generatedAt: string, staleA
 
   const workers = await Promise.all(workerIds.map(async (workerId) => {
     const dir = join(workerRoot, workerId);
+    const workerDir = dir;
     const [workspace, heartbeat, result, usage, workerTask] = await Promise.all([
       readJsonFile<WorkerRecord>(join(dir, "workspace.json")),
       readJsonFile<HeartbeatRecord>(join(dir, "heartbeat.json")),
@@ -212,6 +215,7 @@ async function workersForEntry(entry: RegistryEntry, generatedAt: string, staleA
       generatedAt,
       staleAfterMs,
       sniffedModel,
+      workerDir,
     });
   }));
   return workers;
@@ -229,6 +233,7 @@ function buildWorker(input: {
   generatedAt: string;
   staleAfterMs?: number;
   sniffedModel?: string;
+  workerDir?: string;
 }): GlobalWorker {
   const startedAt = input.workspace?.startedAt ?? input.task?.createdAt ?? input.entry.createdAt;
   const finishedAt = input.workspace?.finishedAt;
@@ -260,6 +265,7 @@ function buildWorker(input: {
     changedFiles: input.result?.changedFiles,
     summary: input.result?.summary ?? input.state?.message,
     pid: input.workspace?.pid,
+    workerDir: input.workerDir,
   };
 }
 

@@ -282,14 +282,17 @@ const WorkerTable = ({sim, columns}: {sim: Simulation; columns: number}) => {
       <Box>
         <Text color={colors.dim}>{`${fit("ID", 7)} ${fit("STATUS", 10)} ${fit("ACTION", 13)} ${fit("FILE/TARGET", fileW)} ${fit("MODEL", 18)} ${fit("SPAWNED FROM", projectW)} ${fit("CONTEXT", 8)} ${fit("TOKENS IN", 10)} ${fit("TOKENS OUT", 11)} ${fit("RUNTIME", 8)} ${fit("TASK", taskW)} PROGRESS`}</Text>
       </Box>
-      {rows.map((worker, index) => (
-        <Box key={worker.id} backgroundColor={index === sim.selected ? colors.border : undefined}>
-          <Text color={colors.white}>{fit(worker.id, 7)} </Text>
-          <Box width={10}><StatusText worker={worker} spin={spin} /></Box>
-          <Text>{` ${fit(worker.action, 13)} ${fit(worker.file, fileW)} ${fit(worker.model, 18)} ${fit(worker.spawnedFrom, projectW)} ${fit(worker.context, 8)} ${fit(compact(worker.tokensIn), 10)} ${fit(compact(worker.tokensOut), 11)} ${fit(runtime(worker.runtimeSeconds), 8)} ${fit(`${worker.task}/${worker.totalTasks}`, taskW)} `}</Text>
-          <Progress worker={worker} width={10} />
-        </Box>
-      ))}
+      {rows.map((worker, index) => {
+        const rowBg = index === sim.selected ? colors.border : undefined;
+        return (
+          <Box key={worker.id}>
+            <Text color={colors.white} backgroundColor={rowBg}>{fit(worker.id, 7)} </Text>
+            <Box width={10}><StatusText worker={worker} spin={spin} /></Box>
+            <Text backgroundColor={rowBg}>{` ${fit(worker.action, 13)} ${fit(worker.file, fileW)} ${fit(worker.model, 18)} ${fit(worker.spawnedFrom, projectW)} ${fit(worker.context, 8)} ${fit(compact(worker.tokensIn), 10)} ${fit(compact(worker.tokensOut), 11)} ${fit(runtime(worker.runtimeSeconds), 8)} ${fit(`${worker.task}/${worker.totalTasks}`, taskW)} `}</Text>
+            <Progress worker={worker} width={10} />
+          </Box>
+        );
+      })}
       <Text color={colors.dim}>... 8 more workers</Text>
     </Box>
   );
@@ -433,7 +436,7 @@ const App = () => {
   const styleProbe = chalk.hex(colors.green)("●");
 
   return (
-    <Box flexDirection="column" width={size.columns} height={size.rows} backgroundColor={colors.bg}>
+    <Box flexDirection="column" width={size.columns} height={size.rows}>
       <TopBar sim={sim} columns={size.columns} />
       <KpiRow sim={sim} columns={size.columns} />
       <WorkerTable sim={sim} columns={size.columns} />
@@ -444,7 +447,7 @@ const App = () => {
       </Box>
       <Footer columns={size.columns} />
       {sim.toast === null ? null : (
-        <Box position="absolute" right={2} top={1} borderStyle="single" borderColor={colors.orange} paddingX={1}>
+        <Box alignSelf="flex-end" borderStyle="single" borderColor={colors.orange} paddingX={1}>
           <Text color={colors.orange}>{sim.toast} {styleProbe}</Text>
         </Box>
       )}

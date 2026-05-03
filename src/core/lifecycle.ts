@@ -46,6 +46,7 @@ export async function createTask(goal: string, options: { allowedFiles?: string[
     createdAt: now,
     updatedAt: now,
     cwd: paths.rootDir,
+    spawnedFromPath: paths.rootDir,
   };
   await mkdir(taskDir(paths, task.id), { recursive: true });
   await writeJson(taskFile(paths, task.id), task);
