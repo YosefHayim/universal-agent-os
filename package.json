@@ -1,6 +1,6 @@
 {
   "name": "universal-agent-os",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local TypeScript controller for cloud coding agents.",
   "type": "module",
   "bin": {
