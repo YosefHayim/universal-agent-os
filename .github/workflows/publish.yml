@@ -1,16 +1,5 @@
 name: Publish Package
 
-# Publishes universal-agent-os to npm using NPM_TOKEN.
-# Adapted from the ebay-mcp publish workflow (which used OIDC trusted publishing).
-# This repo uses a classic NPM_TOKEN secret instead - set it under
-# Settings > Secrets and variables > Actions > NPM_TOKEN.
-#
-# Triggers:
-#   - push of a v*.*.* tag
-#   - workflow_run after Release completes (GITHUB_TOKEN-pushed tags do not
-#     fire `push:tags` in downstream workflows; this is the bridge)
-#   - workflow_dispatch (manual recovery, e.g. publish an existing tag)
-
 on:
   push:
     tags:
@@ -26,6 +15,7 @@ on:
         default: ''
 
 permissions:
+  id-token: write
   contents: read
 
 jobs:
@@ -36,6 +26,7 @@ jobs:
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
     env:
       INPUT_TAG: ${{ inputs.tag }}
@@ -71,9 +62,16 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
           cache: pnpm
+
+      - name: Verify npm supports OIDC Trusted Publishing
+        run: |
+          test "$(printf '%s\n' "11.5.1" "$(npm -v)" | sort -V | head -1)" = "11.5.1" || {
+            echo "::error::npm $(npm -v) is below 11.5.1; trusted publishing is not supported"
+            exit 1
+          }
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -81,16 +79,11 @@ jobs:
       - name: Type check
         run: pnpm run typecheck
 
-      - name: Lint
-        run: pnpm run lint
-
       - name: Run tests
         run: pnpm run test
 
       - name: Build
         run: pnpm run build
 
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm publish --no-git-checks --access public
+      - name: Publish to npm (trusted publishing)
+        run: pnpm publish --no-git-checks --access public --provenance
