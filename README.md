@@ -116,18 +116,35 @@ agent-os upgrade
 
 ## Provider setup
 
-Direct CLI providers currently wired for worker launch:
+Agent OS does NOT bundle these CLIs. Install only the providers you want to use, sign in to each, then Agent OS will detect them automatically (`agent-os onboarding` shows which are detected). All providers are independent products with their own pricing and auth.
 
-- `manual`
-- `codex`
-- `claude`
-- `zai`
-- `gemini`
-- `opencode`
-- `kilo`
-- `cline`
+| Provider | Install | Auth |
+|----------|---------|------|
+| claude (Anthropic) | `npm i -g @anthropic-ai/claude-code` | run `claude` (browser OAuth, picks up Pro/Max) |
+| codex (OpenAI) | `npm i -g @openai/codex` | `codex login` (ChatGPT account) |
+| gemini (Google) | `npm i -g @google/gemini-cli` | first run prompts OAuth |
+| opencode | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login` |
+| kilo | see https://kilocode.ai | provider-specific |
+| cline | see https://cline.bot | provider-specific |
+| zai | optional, see https://z.ai | optional |
+| manual | built-in (no install) | — |
 
-Cloud API catalog providers need credentials through `agent-os providers credentials` or the TUI `Provider API keys` menu.
+```bash
+# macOS quick install (skip any provider you don't use)
+npm i -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
+curl -fsSL https://opencode.ai/install | bash
+# then sign in to each:
+claude    # opens browser
+codex login
+gemini    # opens browser
+opencode auth login
+```
+
+Linux users can run the same commands. On Windows the npm packages work cross-platform; the `curl | bash` line needs WSL.
+
+Run `agent-os onboarding` to see which providers are detected on your machine and get sign-in prompts for the missing ones.
+
+Cloud API catalog providers (openrouter, github-models, nvidia-nim, mistral, groq, plus Gemini API-key mode) need credentials through `agent-os providers credentials` or the TUI `Provider API keys` menu — no CLI to install.
 
 Important behavior: providers edit an isolated worker copy. Agent OS saves a task-ranked context bundle before launch, uses file summaries when the byte budget is tight, captures diff, logs, validation, and token usage under `.agent-os/`, and announces those phases with the `[universal-agent-os]` tag; inspect the captured patch with `agent-os task diff <taskId>`.
 

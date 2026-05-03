@@ -1,19 +1,22 @@
 import { test, afterEach } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises' // Added writeFile and mkdir
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { notifyWorkerFinished } from '../src/core/notifications.js'
 
-// Mock process.stderr.isTTY for bell notification
 const originalIsTTY = process.stderr.isTTY
-let stderrOutput = ''
 const originalStderrWrite = process.stderr.write
+const originalStdoutWrite = process.stdout.write
+let stderrOutput = ''
+let stdoutOutput = ''
 
 afterEach(() => {
   process.stderr.isTTY = originalIsTTY
   process.stderr.write = originalStderrWrite
+  process.stdout.write = originalStdoutWrite
   stderrOutput = ''
+  stdoutOutput = ''
 })
 
 test('notifyWorkerFinished creates wake file when wakeFiles is true', async () => {
@@ -67,13 +70,16 @@ test('notifyWorkerFinished calls commands when commands are specified', async ()
       message: 'test command message',
     }
 
-    // Create a mock config file to enable the command
     const configDir = join(rootDir, '.agent-os', 'config')
-    await rm(configDir, { recursive: true, force: true }).catch(() => {}) // Ensure clean state
-    await mkdir(configDir, { recursive: true }) // Create config directory recursively
+    await rm(configDir, { recursive: true, force: true }).catch(() => {})
+    await mkdir(configDir, { recursive: true })
 
     const notificationsConfigPath = join(configDir, 'notifications.json')
-    await writeFile(notificationsConfigPath, JSON.stringify({ commands: ['true'] }), 'utf-8')
+    await writeFile(
+      notificationsConfigPath,
+      JSON.stringify({ commands: ['true'], osNotify: false }),
+      'utf-8',
+    )
 
     const result = await notifyWorkerFinished({ rootDir }, event)
 
@@ -83,40 +89,71 @@ test('notifyWorkerFinished calls commands when commands are specified', async ()
   }
 })
 
-test('notifyWorkerFinished rings bell when bell is true and stderr is TTY', async () => {
+test('notifyWorkerFinished rings bell even when stderr is not a TTY', async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), 'agent-os-test-'))
   try {
     const rootDir = tmpDir
-    const taskId = 'test-task-3'
-    const workerId = 'test-worker-3'
     const event = {
-      taskId,
-      workerId,
+      taskId: 'test-task-3',
+      workerId: 'test-worker-3',
       provider: 'manual',
       status: 'completed',
       durationMs: 300,
       message: 'test bell message',
     }
 
-    process.stderr.isTTY = true
-    process.stderr.write = (chunk: string | Uint8Array) => {
+    // Force non-TTY: this is the regression case (bell used to silently no-op
+    // whenever the parent piped stderr, e.g. orchestrators and hooks).
+    process.stderr.isTTY = false
+    process.stderr.write = ((chunk: string | Uint8Array) => {
       stderrOutput += chunk.toString()
       return true
-    }
+    }) as typeof process.stderr.write
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      stdoutOutput += chunk.toString()
+      return true
+    }) as typeof process.stdout.write
 
-    // Create a mock config file to enable the bell
     const configDir = join(rootDir, '.agent-os', 'config')
     await rm(configDir, { recursive: true, force: true }).catch(() => {})
     await mkdir(configDir, { recursive: true })
     const notificationsConfigPath = join(configDir, 'notifications.json')
-    await writeFile(notificationsConfigPath, JSON.stringify({ bell: true }), 'utf-8')
-
+    await writeFile(
+      notificationsConfigPath,
+      JSON.stringify({ bell: true, osNotify: false, wakeFiles: false }),
+      'utf-8',
+    )
 
     const result = await notifyWorkerFinished({ rootDir }, event)
 
     assert.ok(result.ranBell, 'should have rung the bell')
-    assert.equal(stderrOutput, '\u0007', 'stderr should contain the BEL character')
+    const sawBell = stderrOutput.includes('\u0007') || stdoutOutput.includes('\u0007')
+    assert.ok(sawBell, 'BEL character should be written to stderr or stdout')
   } finally {
+    await rm(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('AGENT_OS_NOTIFY_BELL=0 disables the bell', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'agent-os-test-'))
+  const previous = process.env.AGENT_OS_NOTIFY_BELL
+  process.env.AGENT_OS_NOTIFY_BELL = '0'
+  try {
+    const result = await notifyWorkerFinished(
+      { rootDir: tmpDir },
+      {
+        taskId: 't',
+        workerId: 'w',
+        provider: 'manual',
+        status: 'completed',
+        durationMs: 0,
+        message: '',
+      },
+    )
+    assert.equal(result.ranBell, false, 'env override should disable bell')
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_OS_NOTIFY_BELL
+    else process.env.AGENT_OS_NOTIFY_BELL = previous
     await rm(tmpDir, { recursive: true, force: true })
   }
 })
@@ -125,31 +162,32 @@ test('notifyWorkerFinished is a no-op when all options are off', async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), 'agent-os-test-'))
   try {
     const rootDir = tmpDir
-    const taskId = 'test-task-4'
-    const workerId = 'test-worker-4'
     const event = {
-      taskId,
-      workerId,
+      taskId: 'test-task-4',
+      workerId: 'test-worker-4',
       provider: 'manual',
       status: 'completed',
       durationMs: 400,
       message: 'test no-op message',
     }
 
-    // Create a mock config file to disable all options
     const configDir = join(rootDir, '.agent-os', 'config')
     await rm(configDir, { recursive: true, force: true }).catch(() => {})
     await mkdir(configDir, { recursive: true })
     const notificationsConfigPath = join(configDir, 'notifications.json')
-    await writeFile(notificationsConfigPath, JSON.stringify({ wakeFiles: false, bell: false, commands: [] }), 'utf-8')
+    await writeFile(
+      notificationsConfigPath,
+      JSON.stringify({ wakeFiles: false, bell: false, osNotify: false, commands: [] }),
+      'utf-8',
+    )
 
     const result = await notifyWorkerFinished({ rootDir }, event)
 
     assert.equal(result.wroteWakeFile, null, 'should not have written a wake file')
     assert.equal(result.ranBell, false, 'should not have rung the bell')
+    assert.equal(result.ranOsNotify, false, 'should not have fired OS notification')
     assert.equal(result.ranCommands, 0, 'should not have run any commands')
 
-    // Verify wakeups dir does not exist
     let wakeupsDirExists = false
     try {
       await readFile(join(rootDir, '.agent-os', 'wakeups'))

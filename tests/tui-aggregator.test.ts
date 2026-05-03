@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -7,7 +7,9 @@ import { buildSnapshot } from "../src/tui/runtime/aggregator.js";
 import type { RegistryEntry } from "../src/core/global-registry.js";
 
 async function withGlobalFixture<T>(fn: (fixture: { dir: string; repoA: string; repoB: string; registryPath: string }) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(path.join(tmpdir(), "agent-os-aggregator-"));
+  // Resolve symlinks (e.g. macOS /var → /private/var) so test path comparisons match
+  // the realpath-resolved form aggregator/registry code persists.
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), "agent-os-aggregator-")));
   const previous = process.env.AGENT_OS_REGISTRY_FILE;
   const registryPath = path.join(dir, "registry.ndjson");
   process.env.AGENT_OS_REGISTRY_FILE = registryPath;
@@ -132,13 +134,20 @@ test("buildSnapshot reuses cached JSON when mtimes are unchanged", async () => {
     await writeFile(registryPath, `${registryLine("task-a", repoA, "A", "2026-05-02T00:00:00.000Z")}\n`, "utf8");
     const heartbeatPath = path.join(repoA, ".agent-os", "tasks", "task-a", "workers", "worker-a", "heartbeat.json");
 
+    // Pin atime/mtime to a whole-second epoch so we round-trip through `utimes`
+    // without float precision loss across filesystems (Linux ext4 has ns
+    // precision; some macOS filesystems quantize to lower resolution and JS
+    // numbers cannot exactly represent every ns mtime as ms).
+    const pinnedSec = 1777_500_000;
+    await utimes(heartbeatPath, pinnedSec, pinnedSec);
+    const originalStat = await stat(heartbeatPath);
+
     const first = await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
     assert.equal(first.workers[0]?.outputBytes, 25);
 
     // Overwrite heartbeat with new content but preserve mtime. If the JSON
     // cache honors mtime equality the second snapshot should still report
     // the originally cached outputBytes (25) rather than the new value (999).
-    const originalStat = await stat(heartbeatPath);
     await writeFile(heartbeatPath, JSON.stringify({
       taskId: "task-a",
       workerId: "worker-a",
@@ -147,15 +156,113 @@ test("buildSnapshot reuses cached JSON when mtimes are unchanged", async () => {
       lastOutputAt: "2026-05-02T00:03:00.000Z",
       outputBytes: 999,
     }), "utf8");
-    // Restore original mtime; use seconds to match the FS resolution stat reports.
-    const atimeSec = originalStat.atimeMs / 1000;
-    const mtimeSec = originalStat.mtimeMs / 1000;
-    await utimes(heartbeatPath, atimeSec, mtimeSec);
+    await utimes(heartbeatPath, pinnedSec, pinnedSec);
     const restored = await stat(heartbeatPath);
     assert.equal(restored.mtimeMs, originalStat.mtimeMs, "mtime restoration failed; cannot validate caching");
 
     const second = await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
     assert.equal(second.workers[0]?.outputBytes, 25);
+  });
+});
+
+test("buildSnapshot annotates running workers with cpuPercent and rssMb when pid is alive", async () => {
+  if (process.platform === "win32") return; // ps unavailable on Windows; skip.
+  await withGlobalFixture(async ({ repoA, registryPath }) => {
+    await writeTask(repoA, "task-pid", "worker-pid", {
+      goal: "pid",
+      createdAt: "2026-05-02T00:00:00.000Z",
+      status: "running",
+      checkedAt: new Date().toISOString(),
+    });
+    // Overwrite workspace.json with a pid the OS knows about (this test process).
+    const workspacePath = path.join(repoA, ".agent-os", "tasks", "task-pid", "workers", "worker-pid", "workspace.json");
+    await writeFile(workspacePath, JSON.stringify({
+      taskId: "task-pid",
+      workerId: "worker-pid",
+      provider: "manual",
+      workspacePath: path.dirname(workspacePath),
+      isolation: "temp_copy",
+      startedAt: "2026-05-02T00:00:00.000Z",
+      pid: process.pid,
+    }), "utf8");
+    await writeFile(registryPath, `${registryLine("task-pid", repoA, "pid", "2026-05-02T00:00:00.000Z")}\n`, "utf8");
+
+    const snapshot = await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
+    const worker = snapshot.workers.find((w) => w.workerId === "worker-pid");
+    assert.ok(worker, "expected pid worker in snapshot");
+    assert.equal(worker?.pid, process.pid);
+    assert.equal(worker?.status, "running");
+    assert.equal(typeof worker?.cpuPercent, "number");
+    assert.equal(typeof worker?.rssMb, "number");
+    assert.ok((worker?.rssMb ?? 0) > 0, "expected non-zero RSS sample");
+  });
+});
+
+test("buildSnapshot demotes running workers whose pid is no longer alive to stale", async () => {
+  if (process.platform === "win32") return;
+  await withGlobalFixture(async ({ repoA, registryPath }) => {
+    await writeTask(repoA, "task-dead", "worker-dead", {
+      goal: "dead",
+      createdAt: "2026-05-02T00:00:00.000Z",
+      status: "running",
+      checkedAt: new Date().toISOString(),
+    });
+    const workspacePath = path.join(repoA, ".agent-os", "tasks", "task-dead", "workers", "worker-dead", "workspace.json");
+    // 2^31 - 1 — guaranteed not to be a live pid on the test host.
+    await writeFile(workspacePath, JSON.stringify({
+      taskId: "task-dead",
+      workerId: "worker-dead",
+      provider: "manual",
+      workspacePath: path.dirname(workspacePath),
+      isolation: "temp_copy",
+      startedAt: "2026-05-02T00:00:00.000Z",
+      pid: 2147483646,
+    }), "utf8");
+    await writeFile(registryPath, `${registryLine("task-dead", repoA, "dead", "2026-05-02T00:00:00.000Z")}\n`, "utf8");
+
+    const snapshot = await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
+    const worker = snapshot.workers.find((w) => w.workerId === "worker-dead");
+    assert.equal(worker?.status, "stale");
+    assert.equal(worker?.cpuPercent, undefined);
+    assert.equal(worker?.rssMb, undefined);
+  });
+});
+
+test("buildSnapshot freezes runtime for terminal workers using last heartbeat when finishedAt is missing", async () => {
+  await withGlobalFixture(async ({ repoA, registryPath }) => {
+    // Failed worker without workspace.finishedAt — simulates a crash before
+    // external-runner finalized workspace.json. Runtime must freeze at
+    // (lastHeartbeatAt - startedAt) instead of growing toward generatedAt.
+    const taskDir = path.join(repoA, ".agent-os", "tasks", "task-fail", "workers", "worker-fail");
+    await mkdir(taskDir, { recursive: true });
+    await writeFile(path.join(repoA, ".agent-os", "tasks", "task-fail", "task.json"), JSON.stringify({
+      id: "task-fail", goal: "boom", allowedFiles: ["**/*"], risk: "low",
+      createdAt: "2026-05-02T00:00:00.000Z", updatedAt: "2026-05-02T00:00:00.000Z",
+      cwd: repoA, spawnedFromPath: repoA,
+    }), "utf8");
+    await writeFile(path.join(repoA, ".agent-os", "tasks", "task-fail", "state.json"), JSON.stringify({
+      taskId: "task-fail", status: "failed", provider: "manual", workerId: "worker-fail",
+      updatedAt: "2026-05-02T00:02:00.000Z", message: "crashed",
+    }), "utf8");
+    await writeFile(path.join(taskDir, "workspace.json"), JSON.stringify({
+      taskId: "task-fail", workerId: "worker-fail", provider: "manual",
+      workspacePath: taskDir, isolation: "temp_copy",
+      startedAt: "2026-05-02T00:00:00.000Z",
+    }), "utf8");
+    await writeFile(path.join(taskDir, "heartbeat.json"), JSON.stringify({
+      taskId: "task-fail", workerId: "worker-fail", status: "running",
+      checkedAt: "2026-05-02T00:02:00.000Z", lastOutputAt: "2026-05-02T00:02:00.000Z", outputBytes: 10,
+    }), "utf8");
+    await writeFile(path.join(taskDir, "result.json"), JSON.stringify({
+      status: "failed", summary: "crashed", changedFiles: [],
+    }), "utf8");
+    await writeFile(registryPath, `${registryLine("task-fail", repoA, "boom", "2026-05-02T00:00:00.000Z")}\n`, "utf8");
+
+    const snapshot = await buildSnapshot({ sinceMs: Date.parse("2026-05-01T00:00:00.000Z") });
+    const worker = snapshot.workers.find((w) => w.workerId === "worker-fail");
+    assert.equal(worker?.status, "failed");
+    // 2 minutes between startedAt and last heartbeat.
+    assert.equal(worker?.runtimeMs, 2 * 60 * 1000);
   });
 });
 

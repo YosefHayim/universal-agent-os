@@ -76,6 +76,7 @@ test("writeGuardState round-trips through readGuardState", async () => {
     const offState = await readGuardState();
     assert.equal(offState.enabled, false);
   });
+});
 
 test("writeGuardState round-trips three sequential writes", async () => {
   await withTempGuardFile("sequential.json", async (_path) => {
@@ -145,5 +146,4 @@ test("guardFilePath falls back to ~/.config when neither env var is set", () => 
     if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
   }
-});
 });

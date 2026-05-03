@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,9 @@ import { readRegistryEntries } from "../src/core/global-registry.js";
 import type { Task } from "../src/core/types.js";
 
 async function withTempProject<T>(fn: (projectDir: string, registryPath: string) => Promise<T>): Promise<T> {
-  const projectDir = await mkdtemp(path.join(tmpdir(), "agent-os-controller-"));
+  // Resolve symlinks (e.g. macOS /var → /private/var) so test path comparisons match
+  // the realpath-resolved form that controller code persists.
+  const projectDir = await realpath(await mkdtemp(path.join(tmpdir(), "agent-os-controller-")));
   const previous = process.env.AGENT_OS_REGISTRY_FILE;
   process.env.AGENT_OS_REGISTRY_FILE = path.join(projectDir, "registry.ndjson");
   try {

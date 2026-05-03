@@ -14,13 +14,29 @@ import { cleanupWorkers, type TrackedWorker } from "../src/core/worker-cleanup.j
  * `process.kill(-pid, ...)` path.
  */
 function spawnWorker(opts: { ignoreTerm: boolean }): TrackedWorker["child"] {
+  // Children that ignore SIGTERM print "ready" to stdout once their handlers
+  // are installed, so the test can wait for that before driving cleanup.
   const script = opts.ignoreTerm
-    ? "process.on('SIGTERM',()=>{}); process.on('SIGINT',()=>{}); setInterval(()=>{},1000);"
-    : "setInterval(()=>{},1000);";
+    ? "process.on('SIGTERM',()=>{}); process.on('SIGINT',()=>{}); process.stdout.write('ready\\n'); setInterval(()=>{},1000);"
+    : "process.stdout.write('ready\\n'); setInterval(()=>{},1000);";
   // stdio:'pipe' keeps the child fully attached to streams so its SIGTERM
   // handler is honored — with stdio:'ignore' Node sometimes terminates on
   // SIGTERM before user-land handlers run on macOS.
   return spawn(process.execPath, ["-e", script], { stdio: "pipe", detached: true });
+}
+
+async function waitForReady(child: TrackedWorker["child"]): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let buf = "";
+    const onData = (chunk: Buffer): void => {
+      buf += chunk.toString("utf8");
+      if (buf.includes("ready")) {
+        child.stdout?.off("data", onData);
+        resolve();
+      }
+    };
+    child.stdout?.on("data", onData);
+  });
 }
 
 test("cleanupWorkers SIGTERMs graceful workers and prunes their workspaces", async () => {
@@ -39,9 +55,11 @@ test("cleanupWorkers escalates to SIGKILL when grace period elapses", async () =
   const child = spawnWorker({ ignoreTerm: true });
   const tracked: TrackedWorker = { child };
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-  // Give the child a moment to install its SIGTERM handler before cleanup
-  // tries to terminate it; otherwise the test races with Node's startup.
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  // Wait deterministically for the child to install its SIGTERM/SIGINT
+  // handlers (signalled by writing "ready" to stdout). Without this, Node
+  // startup can race with cleanup and the SIGTERM is honored before the
+  // user-land handler runs — making the assertion flake to "SIGTERM".
+  await waitForReady(child);
 
   await cleanupWorkers([tracked], 200);
   await exited;

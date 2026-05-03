@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useFocus, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import chalk from "chalk";
 import { buildSnapshot, watchSnapshots, type AggregateSnapshot, type GlobalWorker } from "./runtime/aggregator.js";
 import { buildProviderRows, type ProviderRow } from "./runtime/provider-limits.js";
@@ -36,6 +36,7 @@ type Kpi = {
 type UiWorker = GlobalWorker & {
   uiId: string;
   uiTaskId: string;
+  uiRepo: string;
   uiGoal: string;
   action: string;
   file: string;
@@ -88,14 +89,10 @@ const formatRelative = (iso?: string): string => {
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
 };
-/** Formats RSS megabytes as `145M`/`1.2G`/`512K` for a 5-character column. */
-const formatMem = (mb?: number): string => {
-  if (mb === undefined || !Number.isFinite(mb)) return "—";
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)}G`;
-  if (mb >= 1) return `${Math.round(mb)}M`;
-  return `${Math.round(mb * 1024)}K`;
-};
-const formatCpu = (cpu?: number): string => cpu === undefined || !Number.isFinite(cpu) ? "—" : `${cpu.toFixed(1)}%`;
+/** Aggregate worker CPU as a fixed-1 percent string — used by the SYSTEM LOAD panel. */
+const formatTotalCpu = (cpu: number): string => `${cpu.toFixed(1)}%`;
+/** Aggregate worker RSS in human-readable MB/GB; SYSTEM LOAD prefers GB so totals stay short. */
+const formatTotalMem = (mb: number): string => mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 const fit = (value: string, width: number) => value.length > width ? `${value.slice(0, Math.max(0, width - 1))}…` : value.padEnd(width);
 const fitLeft = (value: string, width: number) => value.length > width ? `…${value.slice(-(Math.max(0, width - 1)))}` : value.padEnd(width);
 const percent = (value: number, total: number) => total > 0 ? Math.round((value / total) * 100) : 0;
@@ -106,8 +103,13 @@ const sparkline = (values: number[]) => {
 };
 const workerKey = (worker: GlobalWorker) => `${worker.repoRoot}:${worker.taskId}:${worker.workerId}`;
 const shortWorkerId = (worker: GlobalWorker) => worker.workerId === "—" ? "—" : worker.workerId.slice(0, 8);
-/** Short stable slice of the registry taskId so users can grep logs / find the task on disk. */
-const shortTaskId = (taskId: string | undefined) => !taskId ? "—" : taskId.slice(0, 10);
+/**
+ * Short stable slice of the registry taskId so users can grep logs / find the task on disk.
+ * Uses the trailing portion because `createTaskId` produces `task-YYYYMMDD-HHMMSS-XXXXXXXX` —
+ * the first 10 characters collapse to `task-YYYYM` for every task spawned on the same day,
+ * which made every row look identical. The trailing time+random tail is distinct per task.
+ */
+const shortTaskId = (taskId: string | undefined) => !taskId ? "—" : taskId.length <= 10 ? taskId : taskId.slice(-10);
 /** Single-line goal preview for table rows; longer goals get truncated with an ellipsis by `fit`. */
 const goalPreview = (goal: string | undefined) => {
   if (!goal) return "—";
@@ -145,6 +147,7 @@ const toUiWorker = (worker: GlobalWorker): UiWorker => ({
   ...worker,
   uiId: shortWorkerId(worker),
   uiTaskId: shortTaskId(worker.taskId),
+  uiRepo: worker.repoName || "—",
   uiGoal: goalPreview(worker.goal),
   action: actionFrom(worker),
   file: fileFrom(worker),
@@ -273,6 +276,19 @@ const KpiRow = ({ snapshot, load, columns }: { snapshot: AggregateSnapshot; load
   const idle = Math.max(0, snapshot.counts.workers - snapshot.counts.active - snapshot.counts.completed - snapshot.counts.failed);
   const activePct = percent(snapshot.counts.active, snapshot.counts.workers);
   const idlePct = percent(idle, snapshot.counts.workers);
+  // Aggregate live process stats across running workers — these used to be
+  // per-row columns and were removed to fix table overflow. Summed each tick
+  // so the SYSTEM LOAD panel reflects the polling cadence rather than
+  // rendering static constants.
+  let totalCpu = 0;
+  let totalRssMb = 0;
+  let runningCount = 0;
+  for (const worker of snapshot.workers) {
+    if (worker.status !== "running") continue;
+    runningCount += 1;
+    if (Number.isFinite(worker.cpuPercent)) totalCpu += worker.cpuPercent ?? 0;
+    if (Number.isFinite(worker.rssMb)) totalRssMb += worker.rssMb ?? 0;
+  }
   const kpis: Kpi[] = [
     { label: "WORKERS", value: compact(snapshot.counts.workers), delta: "all repos", color: colors.cyan },
     { label: "ACTIVE", value: compact(snapshot.counts.active), delta: `${activePct}% live`, color: colors.cyan },
@@ -295,7 +311,7 @@ const KpiRow = ({ snapshot, load, columns }: { snapshot: AggregateSnapshot; load
       { borderStyle: "single", borderColor: colors.border, width: sparkWidth, height: 5, paddingX: 1, flexDirection: "column" },
       h(Text, { color: colors.dim }, "SYSTEM LOAD"),
       h(Text, { color: colors.orange }, fit(sparkline(load), Math.max(1, sparkWidth - 4))),
-      h(Text, { color: colors.green }, `${activePct}%`),
+      h(Text, { color: colors.green }, fit(`workers ${runningCount}  cpu ${formatTotalCpu(totalCpu)}  mem ${formatTotalMem(totalRssMb)}`, Math.max(1, sparkWidth - 4))),
     ),
   );
 };
@@ -305,19 +321,23 @@ const WINDOW_SIZE = 10;
 const WorkerTable = ({ workers, selected, columns, spinnerIndex, scrollOffset }: { workers: UiWorker[]; selected: number; columns: number; spinnerIndex: number; scrollOffset: number }) => {
   const rows = workers.slice(scrollOffset, scrollOffset + WINDOW_SIZE);
   const fileW = Math.max(12, Math.floor(columns * 0.08));
-  const goalW = Math.max(20, Math.floor(columns * 0.18));
+  const goalW = Math.max(18, Math.floor(columns * 0.16));
   const workerW = 9;
+  const rootW = 14;
   const taskW = 11;
   const providerW = 9;
   const modelW = 16;
   const spin = spinnerFrames[(spinnerIndex + 2) % spinnerFrames.length];
   const overflow = workers.length > WINDOW_SIZE;
   const lastVisible = Math.min(workers.length, scrollOffset + rows.length);
+  // CPU/MEM are reported in aggregate by the SYSTEM LOAD panel rather than
+  // per row — the 160-col table was overflowing and clipping the right edge
+  // (TOKENS columns were getting truncated to whitespace on standard widths).
   return h(
     Box,
     { borderStyle: "double", borderColor: colors.border, height: 15, flexDirection: "column", paddingX: 1 },
     h(Text, { color: colors.orange, bold: true }, "ACTIVE WORKERS"),
-    h(Box, null, h(Text, { color: colors.cyan, bold: true }, `${fit("STATUS", 10)} ${fit("WORKER", workerW)} ${fit("TASK", taskW)} ${fit("GOAL", goalW)} ${fit("FILE/TARGET", fileW)} ${fit("PROVIDER", providerW)} ${fit("MODEL", modelW)} ${fit("TOKENS IN", 10)} ${fit("TOKENS OUT", 11)} ${fit("RUNTIME", 8)} ${fit("LAST ACT", 9)} ${fit("CPU", 5)} ${fit("MEM", 5)} PROGRESS`)),
+    h(Box, null, h(Text, { color: colors.cyan, bold: true }, `${fit("STATUS", 10)} ${fit("WORKER", workerW)} ${fit("ROOT", rootW)} ${fit("TASK", taskW)} ${fit("GOAL", goalW)} ${fit("FILE/TARGET", fileW)} ${fit("PROVIDER", providerW)} ${fit("MODEL", modelW)} ${fit("TOKENS IN", 10)} ${fit("TOKENS OUT", 11)} ${fit("RUNTIME", 8)} ${fit("LAST ACT", 9)} PROGRESS`)),
     ...rows.map((worker, absoluteIndex) => {
       const index = scrollOffset + absoluteIndex;
       const rowBg = index === selected ? colors.border : undefined;
@@ -326,8 +346,9 @@ const WorkerTable = ({ workers, selected, columns, spinnerIndex, scrollOffset }:
         { key: workerKey(worker) },
         h(Box, { width: 10 }, h(StatusText, { worker, spin })),
         h(Text, { color: colors.white, backgroundColor: rowBg }, ` ${fit(worker.uiId, workerW)} `),
+        h(Text, { color: colors.blue, backgroundColor: rowBg }, `${fit(worker.uiRepo, rootW)} `),
         h(Text, { color: colors.dim, backgroundColor: rowBg }, `${fit(worker.uiTaskId, taskW)} `),
-        h(Text, { backgroundColor: rowBg }, `${fit(worker.uiGoal, goalW)} ${fit(worker.file, fileW)} ${fit(worker.providerLabel, providerW)} ${fit(worker.model, modelW)} ${fit(compact(worker.tokensIn), 10)} ${fit(compact(worker.tokensOut), 11)} ${fit(runtime(worker.runtimeMs), 8)} ${fit(formatRelative(worker.lastHeartbeatAt), 9)} ${fit(formatCpu(worker.cpuPercent), 5)} ${fit(formatMem(worker.rssMb), 5)} `),
+        h(Text, { backgroundColor: rowBg }, `${fit(worker.uiGoal, goalW)} ${fit(worker.file, fileW)} ${fit(worker.providerLabel, providerW)} ${fit(worker.model, modelW)} ${fit(compact(worker.tokensIn), 10)} ${fit(compact(worker.tokensOut), 11)} ${fit(runtime(worker.runtimeMs), 8)} ${fit(formatRelative(worker.lastHeartbeatAt), 9)} `),
         h(Progress, { worker, width: 10, spinIndex: spinnerIndex }),
       );
     }),
@@ -476,8 +497,44 @@ const RightColumn = ({ snapshot, tokensIn, tokensOut, providerRows, tokenWindowL
   h(UsageLimitsPanel, { rows: providerRows }),
 );
 
-const Footer = ({ columns, paused }: { columns: number; paused: boolean }) => {
-  const text = `q Quit  ←/→ Worker  Tab Focus  [/] Window  r Refresh  s Sort  p ${paused ? "Resume" : "Pause"}  ? Help    Auto-refresh: ${paused ? "PAUSED" : "ON"}`;
+type SortMode = "default" | "runtime" | "tokens" | "status" | "model";
+
+const SORT_LABEL: Record<SortMode, string> = {
+  default: "default",
+  runtime: "runtime ↓",
+  tokens: "tokens ↓",
+  status: "status",
+  model: "model A→Z",
+};
+
+/** Status precedence for the `status` sort: live work first, terminal/idle states last. */
+const STATUS_RANK: Record<string, number> = {
+  running: 0,
+  queued: 1,
+  paused: 2,
+  completed: 3,
+  failed: 4,
+  cancelled: 5,
+  stale: 6,
+};
+
+const sortWorkers = (workers: UiWorker[], mode: SortMode): UiWorker[] => {
+  if (mode === "default") return workers;
+  const copy = workers.slice();
+  switch (mode) {
+    case "runtime":
+      return copy.sort((a, b) => b.runtimeMs - a.runtimeMs);
+    case "tokens":
+      return copy.sort((a, b) => ((b.tokensIn ?? 0) + (b.tokensOut ?? 0)) - ((a.tokensIn ?? 0) + (a.tokensOut ?? 0)));
+    case "status":
+      return copy.sort((a, b) => (STATUS_RANK[a.status] ?? 99) - (STATUS_RANK[b.status] ?? 99));
+    case "model":
+      return copy.sort((a, b) => a.model.localeCompare(b.model));
+  }
+};
+
+const Footer = ({ columns, paused, sortMode }: { columns: number; paused: boolean; sortMode: SortMode }) => {
+  const text = `q Quit  ←/→ Worker  Tab Focus  [/] Window  r Refresh  s Sort: ${SORT_LABEL[sortMode]}  p ${paused ? "Resume" : "Pause"}  ? Help    Auto-refresh: ${paused ? "PAUSED" : "ON"}`;
   return h(Box, { height: 1 }, h(Text, { color: colors.dim }, text.padStart(columns)));
 };
 
@@ -506,7 +563,6 @@ const recordStatusChanges = (previous: Map<string, GlobalWorker>, workers: Globa
 export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashboardProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const { isFocused } = useFocus({ autoFocus: true });
   const [start] = useState(() => Date.now());
   const [now, setNow] = useState(() => new Date());
   const [spinnerIndex, setSpinnerIndex] = useState(0);
@@ -514,7 +570,7 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([]);
   const [paused, setPaused] = useState<boolean>(false);
   const [helpOpen, setHelpOpen] = useState<boolean>(false);
-  const [sortMode, setSortMode] = useState<"default" | "runtime" | "tokens" | "status" | "model">("default");
+  const [sortMode, setSortMode] = useState<SortMode>("default");
   const [tokenWindowIdx, setTokenWindowIdx] = useState<number>(0);
   const [selected, setSelected] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -571,7 +627,8 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
   }, [stdout]);
 
   const visibleSnapshot = useMemo(() => filterSnapshot(snapshot, taskIdFilter), [snapshot, taskIdFilter]);
-  const workers = useMemo(() => visibleSnapshot.workers.map(toUiWorker), [visibleSnapshot.workers]);
+  const unsortedWorkers = useMemo(() => visibleSnapshot.workers.map(toUiWorker), [visibleSnapshot.workers]);
+  const workers = useMemo(() => sortWorkers(unsortedWorkers, sortMode), [unsortedWorkers, sortMode]);
 
   useEffect(() => {
     setLoad((values) => [...values.slice(1), visibleSnapshot.counts.active]);
@@ -691,9 +748,10 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
       return;
     }
     if (input === "s") {
-      const order: Array<"default" | "runtime" | "tokens" | "status" | "model"> = ["default", "runtime", "tokens", "status", "model"];
-      setSortMode((cur) => order[(order.indexOf(cur) + 1) % order.length] ?? "default");
-      setToast(`sort: ${sortMode}`);
+      const order: SortMode[] = ["default", "runtime", "tokens", "status", "model"];
+      const next = order[(order.indexOf(sortMode) + 1) % order.length] ?? "default";
+      setSortMode(next);
+      setToast(`sort: ${SORT_LABEL[next]}`);
       return;
     }
     if (input === "[") {
@@ -719,7 +777,7 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
   const tableHeight = 15;
   const footerHeight = 1;
   const bottomHeight = Math.max(20, size.rows - topHeight - kpiHeight - tableHeight - footerHeight);
-  const focusedBorder = useMemo(() => isFocused ? colors.border : colors.dim, [isFocused]);
+  const focusedBorder = colors.border;
   const styleProbe = chalk.hex(colors.green)("●");
 
   return h(
@@ -735,7 +793,7 @@ export default function WatchDashboard({ intervalMs, taskIdFilter }: WatchDashbo
       h(ActivityLog, { entries: activityEntries, scrollOffset: activityScrollOffset, focused: activityFocused, columns: Math.floor(size.columns * 0.45) }),
       h(RightColumn, { snapshot: visibleSnapshot, tokensIn, tokensOut, providerRows, tokenWindowLabel: TOKEN_WINDOWS[tokenWindowIdx]!.label, tokenWindowMs: TOKEN_WINDOWS[tokenWindowIdx]!.ms }),
     ),
-    h(Footer, { columns: size.columns, paused }),
+    h(Footer, { columns: size.columns, paused, sortMode }),
     toast === null ? null : h(Box, { alignSelf: "flex-end", borderStyle: "single", borderColor: colors.orange, paddingX: 1 }, h(Text, { color: colors.orange }, `${toast} ${styleProbe}`)),
   );
 }

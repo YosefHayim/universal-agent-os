@@ -19,7 +19,7 @@ import { appendRegistryEntry } from "./global-registry.js";
 import { compileContext } from "../context/compiler.js";
 import { listModels, modelsDoctor, refreshModels } from "../models/index.js";
 import { runExternalProvider, type ExternalProviderProgress } from "../providers/external-runner.js";
-import { runManualProvider, runManualTask } from "../providers/manual.js";
+import { runManualProvider } from "../providers/manual.js";
 import { notifyWorkerFinished } from "./notifications.js";
 
 async function safeNotify(rootDir: string, event: { taskId: string; workerId: string; provider: string; status: string; durationMs: number; message: string }): Promise<void> {

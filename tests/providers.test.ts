@@ -459,6 +459,13 @@ test("cline parser unwraps nested auth errors from free-model runner output", as
 test("direct CLI dry-run accepts an uncached explicit model id", async () => {
   await withTempProject(async (projectDir) => {
     const controller = await Controller.create({ rootDir: projectDir });
+    // CI runners may not have these CLIs installed. The dry-run path is about
+    // routing/launch-command shape, not live provider health, so pin availability
+    // via manual overrides so the route doesn't fall back to manual.
+    const config = await loadAgentOsConfig({ cwd: projectDir });
+    await setProviderStatusOverride(config.paths, "gemini", "available", "test override");
+    await setProviderStatusOverride(config.paths, "kilo", "available", "test override");
+    await setProviderStatusOverride(config.paths, "cline", "available", "test override");
     const created = await controller.taskCreate("prove uncached model passthrough", {
       allowedFiles: ["src/**"],
       risk: "low",

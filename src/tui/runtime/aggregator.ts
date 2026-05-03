@@ -236,8 +236,15 @@ function buildWorker(input: {
   workerDir?: string;
 }): GlobalWorker {
   const startedAt = input.workspace?.startedAt ?? input.task?.createdAt ?? input.entry.createdAt;
-  const finishedAt = input.workspace?.finishedAt;
   const status = workerStatus(input.state, input.heartbeat, input.result, input.generatedAt, input.staleAfterMs);
+  // Terminal statuses must freeze runtime. Prefer the explicit workspace
+  // `finishedAt` (set by external-runner on clean exit); fall back to the last
+  // heartbeat / output timestamp for crash paths where workspace.json was
+  // never finalized. Without this, failed/cancelled/stale workers keep
+  // accruing runtime as if they were still live.
+  const isTerminal = status === "completed" || status === "failed" || status === "cancelled" || status === "stale";
+  const finishedAt = input.workspace?.finishedAt
+    ?? (isTerminal ? (input.heartbeat?.checkedAt ?? input.heartbeat?.lastOutputAt) : undefined);
   const tokensIn = Math.max(input.usage?.inputTokens ?? 0, input.usage?.estimatedInputTokens ?? 0) || undefined;
   const tokensOut = Math.max(input.usage?.outputTokens ?? 0, input.usage?.estimatedOutputTokens ?? 0) || undefined;
   const tokensCached = input.usage?.cachedInputTokens;
